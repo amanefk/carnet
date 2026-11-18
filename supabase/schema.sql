@@ -138,3 +138,11 @@ create index if not exists units_user_idx on units(user_id);
 create index if not exists resources_user_idx on resources(user_id);
 create index if not exists exams_user_idx on exams(user_id);
 create index if not exists links_user_idx on links(user_id);
+
+-- Droits d'accès à l'API --------------------------------------
+-- Les projets Supabase récents n'exposent plus les nouvelles tables
+-- par défaut : sans ces GRANT, l'API répond 403 même connectée.
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on semesters, subjects, units, resources, exams, links, vault to authenticated;
+revoke all on semesters, subjects, units, resources, exams, links, vault from anon;
+revoke truncate, references, trigger on semesters, subjects, units, resources, exams, links, vault from authenticated;
