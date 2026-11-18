@@ -960,11 +960,14 @@ function render() {
   const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
   const scroll = scrollY;
   const keepScroll = $app.dataset.route === location.hash;
+  const sideScroll = $app.querySelector(".side")?.scrollTop ?? 0; // le menu garde sa position d'une page à l'autre
   $app.innerHTML = `<div class="shell">${sidebar(r)}<div>
     <div class="topbar"><a class="brand" href="#/" style="margin:0"><i><b style="background:var(--accent)"></b><b style="background:var(--hot)"></b><b style="background:var(--accent-2)"></b></i>Carnet</a><button data-menu aria-label="Menu">Menu</button></div>
     <main>${(views[r.a] || notFound)()}</main></div></div>`;
   $app.dataset.route = location.hash;
   if (keepScroll) scrollTo(0, scroll); else scrollTo(0, 0);
+  const side = $app.querySelector(".side");
+  if (side) side.scrollTop = sideScroll;
   document.title = `Carnet ESIEE`;
 }
 
