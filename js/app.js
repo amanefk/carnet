@@ -917,6 +917,13 @@ function screenLogin() {
     <button type="button" class="ghost" data-action="toggle-auth">${signup ? "J'ai déjà un compte" : "Première visite : créer le compte"}</button>
   </form></div>`;
 }
+const themeLabel = () => (document.documentElement.dataset.theme === "dark" ? "☀ Mode clair" : "☾ Mode sombre");
+actions["toggle-theme"] = () => {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("theme", t); } catch { /* stockage indisponible : le choix vaut pour cette visite */ }
+  render();
+};
 actions["toggle-auth"] = () => { authMode = authMode === "login" ? "signup" : "login"; render(); };
 
 function route() {
@@ -941,7 +948,8 @@ function sidebar(r) {
       ${sems.map((s) => `<h4><a href="#/s/${s.id}"${on(r.a === "s" && r.b === s.id)} style="padding:0;display:inline">${esc(s.name)}</a></h4>
         ${subjectsIn(s.id).map((m) => { const p = progress(unitsOf(m.id));
           return `<a href="#/m/${m.id}"${on(r.a === "m" && r.b === m.id)}><span>${esc(m.name)}</span><span class="pct">${p == null ? "" : p + " %"}</span></a>`; }).join("")}`).join("")}
-    </nav></aside>`;
+    </nav>
+    <button class="theme-toggle" data-action="toggle-theme">${themeLabel()}</button></aside>`;
 }
 
 function render() {
