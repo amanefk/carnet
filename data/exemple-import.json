@@ -1,0 +1,31 @@
+{
+  "semesters": [
+    {
+      "name": "Exemple S1",
+      "start_date": "2026-09-01",
+      "end_date": "2027-01-31",
+      "subjects": [
+        {
+          "code": "EX-101",
+          "name": "Matière d'exemple",
+          "ue": "UE d'exemple",
+          "ects": 4,
+          "coef": 2,
+          "teacher": "Nom de l'enseignant",
+          "description": "Objectifs de la matière, modalités d'évaluation…",
+          "units": [
+            { "kind": "Chapitre", "title": "Premier chapitre" },
+            { "kind": "TP", "title": "Premier TP", "date": "2026-09-15" },
+            "Un titre seul suffit aussi (type Chapitre par défaut)"
+          ]
+        }
+      ]
+    }
+  ],
+  "exams": [
+    { "title": "Partiel d'exemple", "kind": "Partiel", "starts_at": "2027-01-12T09:00:00+01:00", "location": "Salle à préciser", "coef": 1, "subject_code": "EX-101" }
+  ],
+  "links": [
+    { "title": "Nom du service", "url": "https://exemple.fr", "category": "École" }
+  ]
+}
