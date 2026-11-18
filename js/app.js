@@ -87,7 +87,9 @@ function progress(units) {
 function currentSemester() {
   const now = new Date();
   const sems = [...state.semesters].sort(byPos);
-  return sems.find((s) => s.start_date && s.end_date && new Date(s.start_date) <= now && now <= new Date(s.end_date + "T23:59")) || sems[sems.length - 1];
+  return sems.find((s) => s.start_date && s.end_date && new Date(s.start_date) <= now && now <= new Date(s.end_date + "T23:59"))
+    || sems.find((s) => !s.end_date || new Date(s.end_date + "T23:59") >= now) // sans dates : le premier semestre non terminé
+    || sems[sems.length - 1];
 }
 
 /* =========================================================
