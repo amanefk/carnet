@@ -658,6 +658,15 @@ function nextCoursesSection() {
 const DIFFS = { facile: "Facile", moyen: "Moyen", difficile: "Difficile" };
 const GAME_SIZE = 10;
 let reviseDiff = "moyen";
+// PDF retenus pour la génération, par matière (tous par défaut), mémorisés dans le navigateur
+const pdfSel = (() => { try { return JSON.parse(localStorage.getItem("pdfSel") || "{}"); } catch { return {}; } })();
+const subjectPdfs = (subjectId) => state.resources.filter((r) => r.subject_id === subjectId && isPdf(r)).sort((a, b) => a.title.localeCompare(b.title));
+function selectedPdfs(subjectId) {
+  const all = subjectPdfs(subjectId);
+  const sel = pdfSel[subjectId];
+  return sel ? all.filter((r) => sel.includes(r.id)) : all;
+}
+function savePdfSel() { try { localStorage.setItem("pdfSel", JSON.stringify(pdfSel)); } catch { /* sans stockage */ } }
 let study = null; // partie en cours
 
 const poolOf = (subjectId, diff) => (state.quizPools || []).find((p) => p.subject_id === subjectId && p.difficulty === diff);
@@ -673,7 +682,16 @@ function reviseSection(sub) {
   const att = attemptsOf(sub.id, reviseDiff);
   const pct = (a) => Math.round((a.score / a.total) * 100);
   const best = att.length ? att.reduce((m, a) => (pct(a) > pct(m) ? a : m)) : null;
-  const pdfs = state.resources.filter((r) => r.subject_id === sub.id && r.kind === "file" && /\.pdf$/i.test(r.title)).length;
+  const allPdfs = subjectPdfs(sub.id);
+  const chosen = new Set(selectedPdfs(sub.id).map((r) => r.id));
+  const pdfs = chosen.size;
+  const picker = allPdfs.length ? `<details class="pdf-pick"${pdfSel[sub.id] ? " open" : ""}>
+      <summary>Supports utilisés : <b>${pdfs} / ${allPdfs.length} PDF</b></summary>
+      <div class="pdf-list">${allPdfs.map((r) => `<label class="pdf-item"><input type="checkbox" data-pdf-sel="${sub.id}" value="${r.id}"${chosen.has(r.id) ? " checked" : ""}>
+        <span>${esc(r.title)}</span><small>${fmtSize(r.size)}${r.text_chars === 0 ? ", pas de texte" : ""}</small></label>`).join("")}</div>
+      <div class="actions"><button class="ghost" data-action="pdf-all" data-id="${sub.id}">Tout cocher</button><button class="ghost" data-action="pdf-none" data-id="${sub.id}">Tout décocher</button></div>
+      <p class="small muted">Changer la sélection génère un nouveau jeu de questions au prochain lancement (le score repart de zéro pour ce niveau).</p>
+    </details>` : "";
   return `<section>
     <div class="sec-head"><h2>Réviser</h2>
       <span class="seg" role="group" aria-label="Difficulté">${Object.entries(DIFFS).map(([k, l]) =>
@@ -684,10 +702,11 @@ function reviseSection(sub) {
         <button class="primary" data-action="study" data-id="${sub.id}" data-mode="flashcards">Lancer les flashcards</button>
         ${pool ? `<button class="ghost" data-action="study-regen" data-id="${sub.id}">Régénérer les questions</button>` : ""}
       </div>
+      ${picker}
       <p class="small muted">${pool
         ? `Jeu de ${pool.item_count} questions généré le ${fmtDate(pool.created_at, { day: "numeric", month: "short" })} à partir de ${pool.sources?.pdfs?.length || 0} PDF et du plan du cours. Chaque partie en tire ${GAME_SIZE} au hasard.
            ${pool.sources?.skipped?.length ? ` Non lus : ${pool.sources.skipped.map(esc).join(", ")}.` : ""}`
-        : `Aucun jeu en niveau ${DIFFS[reviseDiff].toLowerCase()} pour l'instant : le premier lancement génère ${pdfs ? `les questions à partir de tes ${pdfs} PDF et du plan du cours` : "les questions à partir du plan du cours (ajoute tes PDF dans Ressources pour des questions plus précises)"}. Compte jusqu'à une minute.`}</p>
+        : `Aucun jeu en niveau ${DIFFS[reviseDiff].toLowerCase()} pour l'instant : le premier lancement génère ${pdfs ? `les questions à partir de ${pdfs > 1 ? `tes ${pdfs} PDF` : "ton PDF"} et du plan du cours` : "les questions à partir du plan du cours (ajoute tes PDF dans Ressources pour des questions plus précises)"}. Compte jusqu'à une minute.`}</p>
       ${att.length ? `<div class="scores">
         <span><b>${att.length}</b> partie${att.length > 1 ? "s" : ""}</span>
         <span>meilleur <b>${best.score}/${best.total}</b></span>
@@ -734,7 +753,8 @@ async function startStudy(subjectId, mode, force = false) {
   }, 1000);
   if (location.hash !== `#/reviser/${subjectId}`) location.hash = `#/reviser/${subjectId}`; else render();
   try {
-    const todo = state.resources.filter((r) => r.subject_id === subjectId && isPdf(r) && r.text_chars == null);
+    const chosen = selectedPdfs(subjectId);
+    const todo = chosen.filter((r) => r.text_chars == null);
     for (const [i, r] of todo.entries()) {
       study.step = `Lecture des PDF (${i + 1}/${todo.length}) : ${r.title}`; render();
       try { await indexPdf(r); } catch (e) { console.warn("extraction", r.title, e); r.text_chars = 0; }
@@ -745,7 +765,7 @@ async function startStudy(subjectId, mode, force = false) {
       signal: AbortSignal.timeout(170000),
       method: "POST",
       headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ subject_id: subjectId, difficulty: study.difficulty, force }),
+      body: JSON.stringify({ subject_id: subjectId, difficulty: study.difficulty, force, pdf_ids: chosen.map((r) => r.id) }),
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(out.error ? `${out.error}${out.detail ? ` (détail : ${out.detail.slice(0, 160)})` : ""}` : `Erreur ${r.status} du serveur.`);
@@ -1414,6 +1434,13 @@ $app.addEventListener("input", (ev) => {
 $app.addEventListener("change", async (ev) => {
   try {
     if (ev.target.matches("[data-upload]")) await uploadFiles(ev.target.files, ev.target.dataset.upload);
+    if (ev.target.matches("[data-pdf-sel]")) {
+      const sid = ev.target.dataset.pdfSel;
+      pdfSel[sid] = [...document.querySelectorAll(`[data-pdf-sel="${sid}"]:checked`)].map((i) => i.value);
+      if (pdfSel[sid].length === subjectPdfs(sid).length) delete pdfSel[sid]; // tout coché = suit les nouveaux PDF
+      savePdfSel(); render();
+      document.querySelector(".pdf-pick")?.setAttribute("open", "");
+    }
     if (ev.target.matches("[data-import-file]")) {
       document.querySelector("[data-import-text]").value = await ev.target.files[0].text();
       toast("Fichier chargé. Vérifie puis clique sur Importer.");
@@ -1493,6 +1520,8 @@ function route() {
 }
 
 actions["revise-diff"] = (el) => { reviseDiff = el.dataset.d; render(); };
+actions["pdf-all"] = (el) => { delete pdfSel[el.dataset.id]; savePdfSel(); render(); };
+actions["pdf-none"] = (el) => { pdfSel[el.dataset.id] = []; savePdfSel(); render(); };
 actions.study = (el) => startStudy(el.dataset.id, el.dataset.mode);
 actions["study-regen"] = (el) => {
   if (!confirm("Régénérer le jeu de questions ? Le score repart de zéro pour ce niveau (l'historique est conservé).")) return;

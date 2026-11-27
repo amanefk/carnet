@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
   const { data: { user } } = await sb.auth.getUser(auth.replace(/^Bearer\s+/i, ""));
   if (!user) return json(401, { error: "Session expirée : reconnecte-toi." });
 
-  let body: { subject_id?: string; difficulty?: string; force?: boolean };
+  let body: { subject_id?: string; difficulty?: string; force?: boolean; pdf_ids?: string[] };
   try { body = await req.json(); } catch { return json(400, { error: "Requête invalide." }); }
   const difficulty = body.difficulty ?? "moyen";
   if (!LEVELS[difficulty] || !body.subject_id) return json(400, { error: "Matière ou difficulté invalide." });
@@ -50,9 +50,11 @@ Deno.serve(async (req) => {
   if (!subject) return json(404, { error: "Matière introuvable." });
   const { data: units } = await sb.from("units").select("title,kind,notes,position").eq("subject_id", subject.id).order("position");
   // Le texte des PDF est extrait dans le navigateur (limite CPU des fonctions) et stocké en base
-  const { data: res } = await sb.from("resources").select("title,storage_path,size,mime,kind,text_content,text_chars")
+  const { data: res } = await sb.from("resources").select("id,title,storage_path,size,mime,kind,text_content,text_chars")
     .eq("subject_id", subject.id).eq("kind", "file");
-  const pdfs = (res ?? []).filter((r) => (r.mime ?? "").includes("pdf") || /\.pdf$/i.test(r.title))
+  // seuls les PDF cochés dans le site sont envoyés (tous si aucune sélection n'est transmise)
+  const wanted = Array.isArray(body.pdf_ids) ? new Set(body.pdf_ids) : null;
+  const pdfs = (res ?? []).filter((r) => ((r.mime ?? "").includes("pdf") || /\.pdf$/i.test(r.title)) && (!wanted || wanted.has(r.id)))
     .sort((a, b) => a.title.localeCompare(b.title));
 
   const hash = await sha256(JSON.stringify({
