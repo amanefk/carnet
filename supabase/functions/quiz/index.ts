@@ -121,11 +121,14 @@ Règles :
 - "chapter" : le titre exact du chapitre concerné tiré du plan, ou une chaîne vide.`;
   parts.push({ text: prompt });
 
-  const models = [Deno.env.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean) as string[];
+  // du plus disponible au plus récent ; GEMINI_MODEL (secret facultatif) passe en premier
+  const models = [...new Set([Deno.env.get("GEMINI_MODEL"), "gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.8-flash"].filter(Boolean) as string[])];
+  const saturated = new Set<string>();
   let lastErr = "";
   console.log(`quiz: ${subject.name} / ${difficulty} : ${used.length} PDF (${Math.round(total / 1024)} Ko), ${(units ?? []).length} chapitres`);
   const attempts = models.flatMap((m) => [{ model: m, thinking: true }, { model: m, thinking: false }]);
   for (const { model, thinking } of attempts) {
+    if (saturated.has(model)) continue;
     const left = DEADLINE_MS - (Date.now() - t0);
     if (left < 15_000) { lastErr ||= "temps écoulé"; break; }
     const t1 = Date.now();
@@ -143,6 +146,8 @@ Règles :
       lastErr = `${model} : ${r.status} ${t.slice(0, 300)}`;
       console.log(`quiz: erreur ${lastErr}`);
       if (r.status === 0) break; // délai dépassé : inutile d'enchaîner
+      if (r.status === 503 || r.status === 404) { saturated.add(model); continue; } // saturé ou inexistant : modèle suivant
+      if (r.status === 429 && models.indexOf(model) < models.length - 1) { saturated.add(model); continue; } // quota propre à ce modèle
       if (r.status === 429) return json(429, { error: "Quota gratuit Gemini atteint pour le moment : réessaie dans quelques minutes.", detail: lastErr });
       if (r.status === 400 && /API key/i.test(t)) return json(502, { error: "La clé Gemini est refusée : vérifie-la dans Supabase.", detail: lastErr });
       continue; // modèle indisponible ou paramètre refusé : on essaie la variante suivante
@@ -164,6 +169,7 @@ Règles :
     if (error) return json(500, { error: error.message });
     return json(200, { pool, cached: false });
   }
+  if (saturated.size === models.length) return json(503, { error: "Les serveurs gratuits de Gemini sont saturés en ce moment. Réessaie dans quelques minutes.", detail: lastErr });
   return json(502, { error: lastErr.includes("temps") || lastErr.includes(": 0 ")
     ? "Gemini a mis trop de temps à répondre. Réessaie ; avec beaucoup de PDF, retire les plus lourds."
     : "Gemini n'a pas pu générer les questions.", detail: lastErr });

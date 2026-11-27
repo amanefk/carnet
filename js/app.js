@@ -697,6 +697,12 @@ const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--
 
 async function startStudy(subjectId, mode, force = false) {
   study = { subjectId, mode, difficulty: reviseDiff, loading: true };
+  const t0 = Date.now();
+  const tick = setInterval(() => {
+    const el = document.querySelector("[data-elapsed]");
+    if (!study?.loading) return clearInterval(tick);
+    if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)} s`;
+  }, 1000);
   if (location.hash !== `#/reviser/${subjectId}`) location.hash = `#/reviser/${subjectId}`; else render();
   try {
     const { data: { session } } = await sb.auth.getSession();
@@ -743,7 +749,8 @@ function viewStudy() {
       <h1>${study.mode === "quiz" ? "Quiz" : "Flashcards"}</h1>
       <p class="meta"><span>${DIFFS[study.difficulty]}</span>${study.items ? `<span>${Math.min(study.idx + 1, study.items.length)} / ${study.items.length}</span><span>score ${study.score}</span>` : ""}</p></div>
       <div class="actions"><a class="btn" href="#/m/${sub.id}">Quitter</a></div></div>`;
-  if (study.loading) return head + `<div class="empty-state"><p>Préparation des questions… Si le jeu doit être généré, Gemini lit tes supports : compte jusqu'à une minute.</p></div>`;
+  if (study.loading) return head + `<div class="empty-state"><p>Préparation des questions… <b data-elapsed>0 s</b></p>
+    <p class="small muted">Si le jeu doit être généré, Gemini lit tes supports : compte 30 secondes à 2 minutes selon le volume de PDF. Ne quitte pas la page.</p></div>`;
   if (study.error) return head + `<div class="empty-state"><p>${esc(study.error)}</p><button data-action="study" data-id="${sub.id}" data-mode="${study.mode}">Réessayer</button></div>`;
 
   if (study.done) {
