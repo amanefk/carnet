@@ -1307,6 +1307,17 @@ function route() {
   return { a: a || "", b };
 }
 
+// Semestres dépliés dans le menu, mémorisés d'une visite à l'autre
+const openSems = new Set((() => { try { return JSON.parse(localStorage.getItem("openSems") || "[]"); } catch { return []; } })());
+actions["toggle-sem"] = (el) => {
+  const id = el.dataset.id;
+  const wasOpen = el.getAttribute("aria-expanded") === "true";
+  if (wasOpen) openSems.delete(id); else openSems.add(id);
+  // replier le semestre de la page en cours : revenir au tableau de bord
+  if (wasOpen && !openSems.has(id) && location.hash.match(new RegExp(`#/(s/${id}|m/(${subjectsIn(id).map((m) => m.id).join("|") || "-"}))`))) location.hash = "#/";
+  try { localStorage.setItem("openSems", JSON.stringify([...openSems])); } catch { /* sans stockage : vaut pour cette visite */ }
+  render();
+};
 function sidebar(r) {
   const sems = [...state.semesters].sort(byPos);
   const on = (cond) => (cond ? ` class="on" aria-current="page"` : "");
@@ -1321,9 +1332,20 @@ function sidebar(r) {
       <a href="#/reglages"${on(r.a === "reglages")}>Réglages</a>
     </nav>
     <nav class="tree" aria-label="Matières">
-      ${sems.map((s) => `<h4><a href="#/s/${s.id}"${on(r.a === "s" && r.b === s.id)} style="padding:0;display:inline">${esc(s.name)}</a></h4>
-        ${subjectsIn(s.id).map((m) => { const p = progress(unitsOf(m.id));
-          return `<a href="#/m/${m.id}"${on(r.a === "m" && r.b === m.id)}><span>${esc(m.name)}</span><span class="pct">${p == null ? "" : p + " %"}</span></a>`; }).join("")}`).join("")}
+      ${sems.map((s) => {
+        const subs = subjectsIn(s.id);
+        // dépliée si choisie, ou si la page affichée appartient à ce semestre
+        const here = (r.a === "s" && r.b === s.id) || (r.a === "m" && subjectOf(r.b)?.semester_id === s.id);
+        const open = openSems.has(s.id) || here;
+        const p = progress(subs.flatMap((m) => unitsOf(m.id)));
+        return `<button class="sem-toggle${open ? " open" : ""}" data-action="toggle-sem" data-id="${s.id}" aria-expanded="${open}">
+            <span>${esc(s.name)}</span><span class="pct">${p == null ? "" : p + " %"}</span></button>
+          ${open ? `<div class="sem-list">
+            <a href="#/s/${s.id}"${on(r.a === "s" && r.b === s.id)}><span>Vue du semestre</span></a>
+            ${subs.map((m) => { const pm = progress(unitsOf(m.id));
+              return `<a href="#/m/${m.id}"${on(r.a === "m" && r.b === m.id)}><span>${esc(m.name)}</span><span class="pct">${pm == null ? "" : pm + " %"}</span></a>`; }).join("")}
+          </div>` : ""}`;
+      }).join("")}
     </nav>
     <button class="theme-toggle" data-action="toggle-theme">${themeLabel()}</button></aside>`;
 }

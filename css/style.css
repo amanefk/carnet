@@ -140,9 +140,15 @@ label > span, .lbl > span { font-weight: 800; }
 }
 .nav a:hover, .tree a:hover { background: var(--accent-2); border-color: var(--line); }
 .nav a.on, .tree a.on { background: var(--accent); color: #fff; border-color: var(--line); box-shadow: var(--shadow-sm); }
-.tree h4 { margin: 1.1rem 0 0.35rem 0.65rem; font-size: 0.85rem; font-weight: 800; }
-.tree h4 a { color: var(--hot); }
-.tree h4 a::before { content: "✦ "; }
+.sem-toggle {
+  width: 100%; justify-content: space-between; margin-top: 0.7rem; padding: 0.45rem 0.65rem;
+  color: var(--hot); background: transparent; box-shadow: none; border-color: transparent; font-size: 0.88rem;
+}
+.sem-toggle > span:first-child::before { content: "▸"; display: inline-block; width: 1em; }
+.sem-toggle.open > span:first-child::before { content: "▾"; }
+.sem-toggle:hover { background: var(--accent-2); border-color: var(--line); box-shadow: none; transform: none; }
+.sem-toggle .pct { font-size: 0.75rem; color: var(--muted); }
+.sem-list { display: grid; gap: 4px; margin: 0.25rem 0 0 0.6rem; padding-left: 0.4rem; border-left: 2px dashed var(--soft); }
 .tree a { font-size: 0.88rem; font-weight: 600; }
 .tree a .pct { white-space: nowrap; font-size: 0.75rem; font-weight: 800; color: var(--muted); }
 .tree a.on .pct { color: #fff; }
