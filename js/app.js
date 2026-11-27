@@ -370,7 +370,7 @@ async function uploadFiles(files, subjectId) {
 /* =========================================================
    Planning (flux iCal de l'école, relayé par la fonction Supabase « planning »)
    ========================================================= */
-const planning = { events: [], loadedAt: 0, loading: false, error: null, week: 0 };
+const planning = { events: [], loadedAt: 0, loading: false, error: null, week: 0, month: 0, view: "week" };
 const PLANNING_TTL = 5 * 60000;
 
 function icsDate(v) {
@@ -426,7 +426,7 @@ async function loadPlanning(force = false) {
       try { msg = (await r.json()).error || msg; } catch { /* réponse non JSON */ }
       throw new Error(msg);
     }
-    planning.events = parseICS(await r.text()).map((e) => ({ ...e, subject: matchSubject(e) }));
+    planning.events = parseICS(await r.text()).map((e, i) => ({ ...e, i, subject: matchSubject(e) }));
     planning.error = null;
   } catch (e) {
     planning.error = e.message || String(e);
@@ -437,7 +437,73 @@ async function loadPlanning(force = false) {
   }
 }
 const hasPlanningUrl = () => Boolean(state.settings?.[0]?.ics_url);
+
+
+/* ---------- couleurs, enseignants, bulle de détails ---------- */
+const PALETTE = ["#AF7EFF", "#FF66A3", "#7CD3FF", "#6EE7B7", "#FFB37C", "#FFE066",
+  "#C8B6FF", "#FF8A8A", "#5ED3C9", "#FFB6E6", "#A3E635", "#F0ABFC"];
+// Même matière = même couleur : rang stable de la matière dans le programme,
+// sinon empreinte de l'intitulé pour les cours non rattachés.
+function courseColor(e) {
+  if (e.subject) {
+    const list = [...state.subjects].sort((x, y) =>
+      (semesterOf(x.semester_id)?.position ?? 0) - (semesterOf(y.semester_id)?.position ?? 0) || (x.position ?? 0) - (y.position ?? 0));
+    const i = list.findIndex((x) => x.id === e.subject.id);
+    if (i >= 0) return PALETTE[i % PALETTE.length];
+  }
+  let h = 0; for (const ch of norm(e.title)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+const TEACHER_RE = /^[A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ'’ -]+\s[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+(?:[ -][A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ'’-]+)*$/;
+const teachersOf = (e) => e.details.filter((l) => TEACHER_RE.test(l));
 const fmtTime = (d) => fmtDate(d, { hour: "2-digit", minute: "2-digit" });
+const minutesOf = (d) => d.getHours() * 60 + d.getMinutes();
+const sameDay = (a, b) => a.toDateString() === b.toDateString();
+
+function closePop() { document.querySelector(".pop")?.remove(); }
+function showPop(anchor, e) {
+  closePop();
+  const t = teachersOf(e);
+  const others = e.details.filter((l) => !t.includes(l));
+  const pop = document.createElement("div");
+  pop.className = "pop"; pop.setAttribute("role", "dialog"); pop.setAttribute("aria-label", e.title);
+  pop.style.setProperty("--c", courseColor(e));
+  pop.innerHTML = `<button class="ghost pop-x" data-pop-close aria-label="Fermer">✕</button>
+    <h3>${esc(e.title)}</h3>
+    <p><strong>${fmtDate(e.start, { weekday: "long", day: "numeric", month: "long" })}</strong>, ${fmtTime(e.start)}–${fmtTime(e.end)}</p>
+    ${e.location ? `<p>Salle : <strong>${esc(e.location)}</strong></p>` : ""}
+    ${t.length ? `<p>Enseignant${t.length > 1 ? "s" : ""} : ${t.map(esc).join(", ")}</p>` : ""}
+    ${others.length ? `<p class="small muted">${others.map(esc).join("<br>")}</p>` : ""}
+    ${e.subject ? `<a class="btn" href="#/m/${e.subject.id}">Ouvrir la matière</a>` : ""}`;
+  document.body.appendChild(pop);
+  if (innerWidth < 720) { pop.classList.add("sheet"); return; }
+  const r = anchor.getBoundingClientRect(); const pw = pop.offsetWidth; const ph = pop.offsetHeight;
+  let left = r.right + 10;
+  if (left + pw > innerWidth - 10) left = r.left - pw - 10;
+  if (left < 10) left = Math.min(Math.max(10, r.left), innerWidth - pw - 10);
+  const top = Math.min(Math.max(10, r.top), innerHeight - ph - 10);
+  pop.style.left = `${left}px`; pop.style.top = `${top}px`;
+}
+document.addEventListener("click", (ev) => {
+  const pop = document.querySelector(".pop"); if (!pop) return;
+  if (ev.target.closest("[data-pop-close]") || ev.target.closest(".pop a")) { closePop(); return; }
+  if (!ev.target.closest(".pop") && !ev.target.closest("[data-action=course]")) closePop();
+});
+addEventListener("keydown", (ev) => { if (ev.key === "Escape") closePop(); });
+addEventListener("scroll", closePop, { passive: true, capture: true });
+
+/* ---------- blocs de cours ---------- */
+// Carte compacte : intitulé, enseignant, salle (l'heure n'apparaît que hors grille horaire)
+function courseCard(e, { time = false, day = false } = {}) {
+  const now = new Date(); const live = e.start <= now && now < e.end; const past = e.end <= now;
+  const t = teachersOf(e);
+  return `<button class="course${live ? " live" : ""}${past ? " past" : ""}" data-action="course" data-i="${e.i}" style="--c:${courseColor(e)}">
+    ${time ? `<span class="when">${day ? `${fmtDate(e.start, { weekday: "short", day: "numeric", month: "short" })}, ` : ""}${fmtTime(e.start)}–${fmtTime(e.end)}${live ? " · en cours" : ""}</span>` : ""}
+    <span class="what">${esc(e.title)}</span>
+    ${t.length ? `<span class="who">${esc(t.join(", "))}</span>` : ""}
+    ${e.location ? `<span class="where">${esc(e.location)}</span>` : ""}
+  </button>`;
+}
 
 function weekStart(offset) {
   const d = new Date(); d.setHours(0, 0, 0, 0);
@@ -445,15 +511,74 @@ function weekStart(offset) {
   return d;
 }
 
-function courseCard(e, withDay = false) {
-  const now = new Date();
-  const live = e.start <= now && now < e.end;
-  const past = e.end <= now;
-  return `<div class="course${live ? " live" : ""}${past ? " past" : ""}${e.subject ? "" : " free"}">
-    <div class="when">${withDay ? `${fmtDate(e.start, { weekday: "short", day: "numeric", month: "short" })}, ` : ""}${fmtTime(e.start)}–${fmtTime(e.end)}${live ? " <b>en cours</b>" : ""}</div>
-    <div class="what">${e.subject ? `<a href="#/m/${e.subject.id}">${esc(e.title)}</a>` : esc(e.title)}</div>
-    ${e.location ? `<div class="where">${esc(e.location)}</div>` : ""}
-    ${e.details.length ? `<div class="sub">${e.details.map(esc).join(", ")}</div>` : ""}
+// Grille horaire (écrans larges) : position et hauteur proportionnelles à l'heure
+function weekGrid(days, evs) {
+  const PPM = 1.15; // pixels par minute
+  let from = 8 * 60, to = 18 * 60;
+  for (const e of evs) { from = Math.min(from, minutesOf(e.start)); to = Math.max(to, minutesOf(e.end) || 24 * 60); }
+  from = Math.floor(from / 60) * 60; to = Math.ceil(to / 60) * 60;
+  const hours = []; for (let m = from; m < to; m += 60) hours.push(m);
+  const today = new Date(); const nowM = minutesOf(today);
+
+  const col = (d) => {
+    const list = evs.filter((e) => sameDay(e.start, d)).sort((a, b) => a.start - b.start);
+    // répartition en couloirs des cours qui se chevauchent
+    const placed = []; let cluster = []; let clusterEnd = 0;
+    const flush = () => { const n = Math.max(...cluster.map((c) => c.lane)) + 1; cluster.forEach((c) => (c.n = n)); cluster = []; };
+    for (const e of list) {
+      if (cluster.length && e.start >= clusterEnd) flush();
+      const used = cluster.filter((c) => c.e.end > e.start).map((c) => c.lane);
+      let lane = 0; while (used.includes(lane)) lane++;
+      const item = { e, lane }; cluster.push(item); placed.push(item);
+      clusterEnd = Math.max(clusterEnd, +e.end);
+    }
+    if (cluster.length) flush();
+    return `<div class="wg-col${sameDay(d, today) ? " today" : ""}" style="height:${(to - from) * PPM}px">
+      ${hours.map((m) => `<span class="wg-line" style="top:${(m - from) * PPM}px"></span>`).join("")}
+      ${sameDay(d, today) && nowM >= from && nowM <= to ? `<span class="wg-now" style="top:${(nowM - from) * PPM}px"></span>` : ""}
+      ${placed.map(({ e, lane, n }) => {
+        const top = (minutesOf(e.start) - from) * PPM; const h = Math.max(22, (e.end - e.start) / 60000 * PPM - 3);
+        return `<div class="wg-ev${h < 56 ? " short" : ""}" style="top:${top}px;height:${h}px;left:calc(${(lane / n) * 100}% + 2px);width:calc(${100 / n}% - 4px)">${courseCard(e)}</div>`;
+      }).join("")}
+    </div>`;
+  };
+  return `<div class="wg" style="--days:${days.length}">
+    <div class="wg-head"><span></span>${days.map((d) => `<span class="${sameDay(d, today) ? "today" : ""}">${fmtDate(d, { weekday: "short", day: "numeric" })}</span>`).join("")}</div>
+    <div class="wg-body">
+      <div class="wg-hours" style="height:${(to - from) * PPM}px">${hours.map((m) => `<span style="top:${(m - from) * PPM}px">${String(m / 60).padStart(2, "0")}h</span>`).join("")}</div>
+      ${days.map(col).join("")}
+    </div></div>`;
+}
+
+// Liste par jour (mobile)
+function weekList(days, evs) {
+  const today = new Date();
+  return `<div class="wl">${days.map((d) => {
+    const list = evs.filter((e) => sameDay(e.start, d));
+    return `<div class="wl-day${sameDay(d, today) ? " today" : ""}"><h3>${fmtDate(d, { weekday: "long", day: "numeric", month: "short" })}</h3>
+      ${list.length ? list.map((e) => courseCard(e, { time: true })).join("") : `<p class="small muted">Pas de cours</p>`}</div>`;
+  }).join("")}</div>`;
+}
+
+function monthGrid(offset) {
+  const first = new Date(); first.setHours(0, 0, 0, 0); first.setDate(1); first.setMonth(first.getMonth() + offset);
+  const gridStart = new Date(first); gridStart.setDate(1 - ((first.getDay() + 6) % 7));
+  const lastDay = new Date(first.getFullYear(), first.getMonth() + 1, 0);
+  const cells = []; const d = new Date(gridStart);
+  while (d <= lastDay || cells.length % 7) { cells.push(new Date(d)); d.setDate(d.getDate() + 1); }
+  const today = new Date();
+  const MAX = 4;
+  return `<div class="mg">
+    ${["Lun.", "Mar.", "Mer.", "Jeu.", "Ven.", "Sam.", "Dim."].map((n) => `<span class="mg-dow">${n}</span>`).join("")}
+    ${cells.map((c) => {
+      const list = planning.events.filter((e) => sameDay(e.start, c));
+      const out = c.getMonth() !== first.getMonth();
+      return `<div class="mg-cell${out ? " out" : ""}${sameDay(c, today) ? " today" : ""}${c.getDay() % 6 === 0 ? " we" : ""}">
+        <button class="mg-num" data-action="goto-week" data-date="${c.toISOString()}" aria-label="Voir la semaine du ${fmtDay(c)}">${c.getDate()}</button>
+        ${list.slice(0, MAX).map((e) => `<button class="chip" data-action="course" data-i="${e.i}" style="--c:${courseColor(e)}" title="${esc(e.title)}"><b>${fmtTime(e.start)}</b> ${esc(e.title)}</button>`).join("")}
+        ${list.length > MAX ? `<button class="chip more" data-action="goto-week" data-date="${c.toISOString()}">+${list.length - MAX}</button>` : ""}
+      </div>`;
+    }).join("")}
   </div>`;
 }
 
@@ -464,36 +589,47 @@ function viewPlanning() {
       <a class="btn" href="#/reglages">Ajouter le lien</a></div>`;
   }
   if (!planning.loading && Date.now() - planning.loadedAt > PLANNING_TTL) loadPlanning();
-  const start = weekStart(planning.week);
-  const end = new Date(start); end.setDate(end.getDate() + 7);
-  const evs = planning.events.filter((e) => e.start >= start && e.start < end);
+  const month = planning.view === "month";
   const last = planning.events[planning.events.length - 1];
-  const days = [...Array(7)].map((_, i) => { const d = new Date(start); d.setDate(d.getDate() + i); return d; })
-    .filter((d, i) => i < 5 || evs.some((e) => e.start.toDateString() === d.toDateString()));
-  const today = new Date().toDateString();
-  const sat = new Date(end); sat.setDate(sat.getDate() - 2);
+  let label, count, body, rangeStart;
 
-  let body;
+  if (month) {
+    const first = new Date(); first.setDate(1); first.setMonth(first.getMonth() + planning.month);
+    rangeStart = first;
+    label = fmtDate(first, { month: "long", year: "numeric" });
+    count = planning.events.filter((e) => e.start.getMonth() === first.getMonth() && e.start.getFullYear() === first.getFullYear()).length;
+    body = monthGrid(planning.month);
+  } else {
+    const start = weekStart(planning.week); rangeStart = start;
+    const end = new Date(start); end.setDate(end.getDate() + 7);
+    const evs = planning.events.filter((e) => e.start >= start && e.start < end);
+    const days = [...Array(7)].map((_, i) => { const d = new Date(start); d.setDate(d.getDate() + i); return d; })
+      .filter((d, i) => i < 5 || evs.some((e) => sameDay(e.start, d)));
+    const sat = new Date(end); sat.setDate(sat.getDate() - 2);
+    label = `Semaine du ${fmtDate(start, { day: "numeric", month: "short" })} au ${fmtDate(sat, { day: "numeric", month: "short" })}`;
+    count = evs.length;
+    body = weekGrid(days, evs) + weekList(days, evs);
+  }
   if (planning.loading && !planning.events.length) body = `<p class="muted">Récupération du planning…</p>`;
   else if (planning.error && !planning.events.length) body = `<div class="empty-state"><p>Impossible de récupérer le planning : ${esc(planning.error)}</p><button data-action="planning-refresh">Réessayer</button></div>`;
-  else body = `<div class="week">${days.map((d) => {
-      const list = evs.filter((e) => e.start.toDateString() === d.toDateString());
-      return `<div class="day${d.toDateString() === today ? " today" : ""}">
-        <h3>${fmtDate(d, { weekday: "long", day: "numeric", month: "short" })}</h3>
-        ${list.length ? list.map((e) => courseCard(e)).join("") : `<p class="small muted">Pas de cours</p>`}</div>`;
-    }).join("")}</div>
-    ${!evs.length && last && start > last.start ? `<p class="muted" style="margin-top:1rem">L'école n'a pas encore publié le planning au-delà du ${fmtDay(last.start)}.</p>` : ""}`;
+  const beyond = last && rangeStart > last.start
+    ? `<p class="muted" style="margin-top:1rem">L'école n'a pas encore publié le planning au-delà du ${fmtDay(last.start)}.</p>` : "";
 
   return `<div class="page-head"><div><h1>Planning</h1>
-      <p class="meta"><span>Semaine du ${fmtDate(start, { day: "numeric", month: "short" })} au ${fmtDate(sat, { day: "numeric", month: "short" })}</span>
-      <span>${evs.length} cours</span>${planning.loadedAt ? `<span>actualisé à ${fmtTime(new Date(planning.loadedAt))}</span>` : ""}</p></div>
-      <div class="actions">
-        <button data-action="week" data-d="-1" aria-label="Semaine précédente">‹ Précédente</button>
-        <button data-action="week" data-d="0">Cette semaine</button>
-        <button data-action="week" data-d="1" aria-label="Semaine suivante">Suivante ›</button>
+      <p class="meta"><span>${label}</span><span>${count} cours</span>${planning.loadedAt ? `<span>actualisé à ${fmtTime(new Date(planning.loadedAt))}</span>` : ""}</p></div></div>
+    <div class="toolbar">
+      <span class="seg" role="group" aria-label="Affichage">
+        <button data-action="planning-view" data-v="week" class="${month ? "" : "on"}" aria-pressed="${!month}">Semaine</button>
+        <button data-action="planning-view" data-v="month" class="${month ? "on" : ""}" aria-pressed="${month}">Mois</button>
+      </span>
+      <span class="actions">
+        <button data-action="shift" data-d="-1" aria-label="${month ? "Mois précédent" : "Semaine précédente"}">‹</button>
+        <button data-action="shift" data-d="0">Aujourd'hui</button>
+        <button data-action="shift" data-d="1" aria-label="${month ? "Mois suivant" : "Semaine suivante"}">›</button>
         <button class="ghost" data-action="planning-refresh" ${planning.loading ? "disabled" : ""}>${planning.loading ? "Actualisation…" : "Actualiser"}</button>
-      </div></div>
-    ${body}`;
+      </span>
+    </div>
+    ${body}${beyond}`;
 }
 
 function nextCoursesSection() {
@@ -503,7 +639,7 @@ function nextCoursesSection() {
   const next = planning.events.filter((e) => e.end > now).slice(0, 3);
   if (!next.length) return "";
   return `<section><div class="sec-head"><h2>Prochains cours</h2><a href="#/planning" class="small">Voir le planning</a></div>
-    <div class="course-row">${next.map((e) => courseCard(e, true)).join("")}</div></section>`;
+    <div class="course-row">${next.map((e) => courseCard(e, { time: true, day: true })).join("")}</div></section>`;
 }
 
 function viewDashboard() {
@@ -909,7 +1045,16 @@ const actions = {
     await Promise.all(changed.map(({ x, k }) => update("units", x.id, { position: k })));
   },
   ics: exportICS,
-  week(el) { const d = Number(el.dataset.d); planning.week = d === 0 ? 0 : planning.week + d; render(); },
+  shift(el) {
+    const d = Number(el.dataset.d); const k = planning.view === "month" ? "month" : "week";
+    planning[k] = d === 0 ? 0 : planning[k] + d; render();
+  },
+  "planning-view"(el) { planning.view = el.dataset.v; render(); },
+  "goto-week"(el) {
+    const d = new Date(el.dataset.date); const mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    planning.week = Math.round((mon - weekStart(0)) / (7 * 86400000)); planning.view = "week"; render();
+  },
+  course(el) { const e = planning.events[Number(el.dataset.i)]; if (e) showPop(el, e); },
   "planning-refresh": () => loadPlanning(true),
   async "save-ics"() {
     const v = document.querySelector("[data-ics-url]").value.trim();
@@ -1111,6 +1256,7 @@ function sidebar(r) {
 }
 
 function render() {
+  closePop();
   if (!configured) { $app.innerHTML = screenSetup(); return; }
   if (!state.user) { $app.innerHTML = screenLogin(); return; }
   if (!state.loaded) { $app.innerHTML = `<div class="center"><p class="muted">Chargement…</p></div>`; return; }
@@ -1143,7 +1289,7 @@ async function boot() {
     if (!state.user) {
       Object.assign(state, { loaded: false, semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [] });
       vault.checked = false; vault.row = null; vaultLock();
-      Object.assign(planning, { events: [], loadedAt: 0, error: null, week: 0 });
+      Object.assign(planning, { events: [], loadedAt: 0, error: null, week: 0, month: 0, view: "week" });
       render(); return;
     }
     if (prev !== state.user.id) { state.loaded = false; render(); try { await loadAll(); } catch (e) { fail(e); } render(); }
