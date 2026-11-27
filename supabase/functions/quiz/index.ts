@@ -18,7 +18,8 @@ const LEVELS: Record<string, string> = {
   moyen: "MOYEN : compréhension et application (expliquer un mécanisme, comparer deux notions, appliquer à un cas simple, petit calcul).",
   difficile: "DIFFICILE : analyse et raisonnement (cas concrets, dépannage, calculs en plusieurs étapes, pièges classiques, liens entre chapitres).",
 };
-const POOL_SIZE = 30;
+const POOL_SIZE = 24;
+const DEADLINE_MS = 135_000; // la plateforme coupe la fonction vers 150 s
 const MAX_PDF_BYTES = 14 * 1024 * 1024; // marge sous la limite de 20 Mo par requête (base64 +33 %)
 
 const schema = {
@@ -49,6 +50,7 @@ async function sha256(text: string) {
 }
 
 Deno.serve(async (req) => {
+  const t0 = Date.now();
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   const key = Deno.env.get("GEMINI_API_KEY");
   if (!key) return json(503, { error: "La clé Gemini n'est pas encore configurée dans Supabase." });
@@ -121,22 +123,29 @@ Règles :
 
   const models = [Deno.env.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"].filter(Boolean) as string[];
   let lastErr = "";
-  for (const model of models) {
+  console.log(`quiz: ${subject.name} / ${difficulty} : ${used.length} PDF (${Math.round(total / 1024)} Ko), ${(units ?? []).length} chapitres`);
+  const attempts = models.flatMap((m) => [{ model: m, thinking: true }, { model: m, thinking: false }]);
+  for (const { model, thinking } of attempts) {
+    const left = DEADLINE_MS - (Date.now() - t0);
+    if (left < 15_000) { lastErr ||= "temps écoulé"; break; }
+    const t1 = Date.now();
+    const generationConfig: Record<string, unknown> = { responseMimeType: "application/json", responseSchema: schema, temperature: 0.7 };
+    if (thinking) generationConfig.thinkingConfig = { thinkingBudget: 0 }; // réflexion désactivée : bien plus rapide
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts }],
-        generationConfig: { responseMimeType: "application/json", responseSchema: schema, temperature: 0.7 },
-      }),
-      signal: AbortSignal.timeout(120000),
+      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }),
+      signal: AbortSignal.timeout(left - 5_000),
     }).catch((e) => ({ ok: false, status: 0, text: async () => String(e) } as Response));
+    console.log(`quiz: ${model}${thinking ? " (sans réflexion)" : ""} -> ${r.status} en ${Date.now() - t1} ms`);
     if (!r.ok) {
       const t = await r.text();
       lastErr = `${model} : ${r.status} ${t.slice(0, 300)}`;
+      console.log(`quiz: erreur ${lastErr}`);
+      if (r.status === 0) break; // délai dépassé : inutile d'enchaîner
       if (r.status === 429) return json(429, { error: "Quota gratuit Gemini atteint pour le moment : réessaie dans quelques minutes.", detail: lastErr });
       if (r.status === 400 && /API key/i.test(t)) return json(502, { error: "La clé Gemini est refusée : vérifie-la dans Supabase.", detail: lastErr });
-      continue; // modèle indisponible : on essaie le suivant
+      continue; // modèle indisponible ou paramètre refusé : on essaie la variante suivante
     }
     const out = await r.json();
     const text = out?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? "").join("") ?? "";
@@ -146,7 +155,7 @@ Règles :
       it && typeof it.question === "string" && Array.isArray(it.choices) && it.choices.length === 4 &&
       Number.isInteger(it.correct) && it.correct >= 0 && it.correct < 4 && typeof it.answer === "string",
     );
-    if (clean.length < 5) { lastErr = `${model} : trop peu de questions valides (${clean.length})`; continue; }
+    if (clean.length < 5) { lastErr = `${model} : trop peu de questions valides (${clean.length})`; console.log(`quiz: ${lastErr}`); continue; }
     const row = {
       user_id: user.id, subject_id: subject.id, difficulty, content_hash: hash,
       items: clean, item_count: clean.length, sources: { pdfs: used, skipped }, model, created_at: new Date().toISOString(),
@@ -155,5 +164,7 @@ Règles :
     if (error) return json(500, { error: error.message });
     return json(200, { pool, cached: false });
   }
-  return json(502, { error: "Gemini n'a pas pu générer les questions.", detail: lastErr });
+  return json(502, { error: lastErr.includes("temps") || lastErr.includes(": 0 ")
+    ? "Gemini a mis trop de temps à répondre. Réessaie ; avec beaucoup de PDF, retire les plus lourds."
+    : "Gemini n'a pas pu générer les questions.", detail: lastErr });
 });

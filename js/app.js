@@ -701,12 +701,13 @@ async function startStudy(subjectId, mode, force = false) {
   try {
     const { data: { session } } = await sb.auth.getSession();
     const r = await fetch(`${SUPABASE_URL}/functions/v1/quiz`, {
+      signal: AbortSignal.timeout(170000),
       method: "POST",
       headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
       body: JSON.stringify({ subject_id: subjectId, difficulty: study.difficulty, force }),
     });
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(out.error || `Erreur ${r.status}`);
+    if (!r.ok) throw new Error(out.error ? `${out.error}${out.detail ? ` (détail : ${out.detail.slice(0, 160)})` : ""}` : `Erreur ${r.status} du serveur.`);
     const { items, ...meta } = out.pool;
     state.quizPools = [...(state.quizPools || []).filter((p) => p.id !== meta.id && !(p.subject_id === subjectId && p.difficulty === meta.difficulty)), meta];
     const picked = shuffle(items).slice(0, GAME_SIZE).map((it) => {
@@ -715,7 +716,8 @@ async function startStudy(subjectId, mode, force = false) {
     });
     Object.assign(study, { loading: false, hash: meta.content_hash, items: picked, idx: 0, score: 0, picked: null, flipped: false, misses: [], fresh: !out.cached });
   } catch (e) {
-    Object.assign(study, { loading: false, error: e.message || String(e) });
+    const msg = e.name === "TimeoutError" ? "La génération n'a pas abouti à temps. Réessaie dans un instant." : (e.message || String(e));
+    Object.assign(study, { loading: false, error: msg });
   }
   render();
 }
