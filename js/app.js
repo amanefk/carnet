@@ -649,7 +649,7 @@ function nextCoursesSection() {
 }
 
 /* =========================================================
-   Révision : quiz et flashcards générés par Gemini (fonction Supabase « quiz »)
+   Révision : quiz et flashcards générés par Mistral (fonction Supabase « quiz »)
    ========================================================= */
 const DIFFS = { facile: "Facile", moyen: "Moyen", difficile: "Difficile" };
 const GAME_SIZE = 10;
@@ -682,7 +682,7 @@ function reviseSection(sub) {
       </div>
       <p class="small muted">${pool
         ? `Jeu de ${pool.item_count} questions généré le ${fmtDate(pool.created_at, { day: "numeric", month: "short" })} à partir de ${pool.sources?.pdfs?.length || 0} PDF et du plan du cours. Chaque partie en tire ${GAME_SIZE} au hasard.
-           ${pool.sources?.skipped?.length ? ` Non lus (trop volumineux) : ${pool.sources.skipped.map(esc).join(", ")}.` : ""}`
+           ${pool.sources?.skipped?.length ? ` Non lus : ${pool.sources.skipped.map(esc).join(", ")}.` : ""}`
         : `Aucun jeu en niveau ${DIFFS[reviseDiff].toLowerCase()} pour l'instant : le premier lancement génère ${pdfs ? `les questions à partir de tes ${pdfs} PDF et du plan du cours` : "les questions à partir du plan du cours (ajoute tes PDF dans Ressources pour des questions plus précises)"}. Compte jusqu'à une minute.`}</p>
       ${att.length ? `<div class="scores">
         <span><b>${att.length}</b> partie${att.length > 1 ? "s" : ""}</span>
@@ -750,7 +750,7 @@ function viewStudy() {
       <p class="meta"><span>${DIFFS[study.difficulty]}</span>${study.items ? `<span>${Math.min(study.idx + 1, study.items.length)} / ${study.items.length}</span><span>score ${study.score}</span>` : ""}</p></div>
       <div class="actions"><a class="btn" href="#/m/${sub.id}">Quitter</a></div></div>`;
   if (study.loading) return head + `<div class="empty-state"><p>Préparation des questions… <b data-elapsed>0 s</b></p>
-    <p class="small muted">Si le jeu doit être généré, Gemini lit tes supports : compte 30 secondes à 2 minutes selon le volume de PDF. Ne quitte pas la page.</p></div>`;
+    <p class="small muted">Si le jeu doit être généré, Mistral lit le texte de tes PDF : compte 30 secondes à 1 minute 30. Ne quitte pas la page.</p></div>`;
   if (study.error) return head + `<div class="empty-state"><p>${esc(study.error)}</p><button data-action="study" data-id="${sub.id}" data-mode="${study.mode}">Réessayer</button></div>`;
 
   if (study.done) {

@@ -66,3 +66,4 @@ data/exemple-import.json
 - **Politique de sécurité du contenu (CSP)** : seuls les scripts hébergés avec le site s'exécutent, et le navigateur ne peut contacter que Supabase. La bibliothèque Supabase est copiée dans `js/vendor/` (version figée) au lieu d'être chargée depuis un CDN.
 - **Inscriptions fermées** dans Supabase (Authentication > Sign In / Providers).
 - **À protéger hors du site** : comptes GitHub, Supabase et la messagerie liée au compte, chacun avec sa propre double authentification.
+- **Révision (quiz et flashcards)** : générée par l'API Mistral (offre gratuite, entraînement sur les données désactivé dans le compte Mistral) via la fonction Supabase `quiz`. Secret à définir : `MISTRAL_API_KEY`.
