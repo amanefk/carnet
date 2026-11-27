@@ -146,3 +146,16 @@ grant usage on schema public to authenticated;
 grant select, insert, update, delete on semesters, subjects, units, resources, exams, links, vault to authenticated;
 revoke all on semesters, subjects, units, resources, exams, links, vault from anon;
 revoke truncate, references, trigger on semesters, subjects, units, resources, exams, links, vault from authenticated;
+
+-- Réglages (lien iCal du planning) --------------------------
+create table if not exists settings (
+  user_id     uuid primary key default auth.uid() references auth.users on delete cascade,
+  ics_url     text,
+  updated_at  timestamptz not null default now()
+);
+alter table settings enable row level security;
+drop policy if exists "own rows" on settings;
+create policy "own rows" on settings for all to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+grant select, insert, update, delete on settings to authenticated;
+revoke all on settings from anon;

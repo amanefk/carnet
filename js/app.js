@@ -12,7 +12,7 @@ const $modal = document.getElementById("modal");
 
 const state = {
   user: null, loaded: false,
-  semesters: [], subjects: [], units: [], resources: [], exams: [], links: [],
+  semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [],
 };
 const vault = { checked: false, row: null, key: null, data: null, revealed: new Set(), timer: null };
 
@@ -69,7 +69,7 @@ function put(list, row) {
 function drop(list, id) { state[list] = state[list].filter((r) => r.id !== id); }
 
 async function loadAll() {
-  const tables = ["semesters", "subjects", "units", "resources", "exams", "links"];
+  const tables = ["semesters", "subjects", "units", "resources", "exams", "links", "settings"];
   const res = await Promise.all(tables.map((t) => q(sb.from(t).select("*"))));
   tables.forEach((t, i) => (state[t] = res[i]));
   state.loaded = true;
@@ -367,6 +367,145 @@ async function uploadFiles(files, subjectId) {
 /* =========================================================
    Vues
    ========================================================= */
+/* =========================================================
+   Planning (flux iCal de l'école, relayé par la fonction Supabase « planning »)
+   ========================================================= */
+const planning = { events: [], loadedAt: 0, loading: false, error: null, week: 0 };
+const PLANNING_TTL = 5 * 60000;
+
+function icsDate(v) {
+  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?/.exec(v || "");
+  if (!m) return null;
+  const [, y, mo, d, h = "0", mi = "0", se = "0", z] = m;
+  return z ? new Date(Date.UTC(+y, mo - 1, +d, +h, +mi, +se)) : new Date(+y, mo - 1, +d, +h, +mi, +se);
+}
+const icsText = (v) => (v || "").replace(/\\n/gi, "\n").replace(/\\([,;\\])/g, "$1").trim();
+
+function parseICS(text) {
+  const lines = text.replace(/\r?\n[ \t]/g, "").split(/\r?\n/);
+  const out = []; let cur = null;
+  for (const l of lines) {
+    if (l === "BEGIN:VEVENT") cur = {};
+    else if (l === "END:VEVENT") { if (cur) out.push(cur); cur = null; }
+    else if (cur) { const i = l.indexOf(":"); if (i > 0) cur[l.slice(0, i).split(";")[0].toUpperCase()] = l.slice(i + 1); }
+  }
+  return out.map((e) => ({
+    uid: e.UID,
+    start: icsDate(e.DTSTART), end: icsDate(e.DTEND),
+    title: icsText(e.SUMMARY), location: icsText(e.LOCATION),
+    details: icsText(e.DESCRIPTION).split("\n").map((x) => x.trim()).filter((x) => x && !/^\(Export/i.test(x)),
+  })).filter((e) => e.start).sort((a, b) => a.start - b.start);
+}
+
+const norm = (t) => ` ${String(t || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+// Rattache un cours à une matière : intitulé complet présent dans le titre ou la description
+// (le plus long gagne, pour distinguer « ingénieur I » de « ingénieur II »), sinon préfixe du titre.
+function matchSubject(ev) {
+  const hay = norm(ev.title + " " + ev.details.join(" "));
+  const t = norm(ev.title);
+  const byLen = (a, b) => b.name.length - a.name.length;
+  const full = state.subjects.filter((s) => hay.includes(norm(s.name))).sort(byLen);
+  if (full.length) return full[0];
+  if (t.trim().length < 6) return null;
+  const pref = state.subjects.filter((s) => norm(s.name).startsWith(t.slice(0, -1)));
+  const cur = currentSemester();
+  return pref.find((s) => s.semester_id === cur?.id) || pref[0] || null;
+}
+
+async function loadPlanning(force = false) {
+  if (planning.loading) return;
+  if (!force && planning.loadedAt && Date.now() - planning.loadedAt < PLANNING_TTL) return;
+  planning.loading = true;
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/planning`, {
+      headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_ANON_KEY },
+    });
+    if (!r.ok) {
+      let msg = `Erreur ${r.status}`;
+      try { msg = (await r.json()).error || msg; } catch { /* réponse non JSON */ }
+      throw new Error(msg);
+    }
+    planning.events = parseICS(await r.text()).map((e) => ({ ...e, subject: matchSubject(e) }));
+    planning.error = null;
+  } catch (e) {
+    planning.error = e.message || String(e);
+  } finally {
+    planning.loading = false;
+    planning.loadedAt = Date.now();
+    render();
+  }
+}
+const hasPlanningUrl = () => Boolean(state.settings?.[0]?.ics_url);
+const fmtTime = (d) => fmtDate(d, { hour: "2-digit", minute: "2-digit" });
+
+function weekStart(offset) {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + offset * 7);
+  return d;
+}
+
+function courseCard(e, withDay = false) {
+  const now = new Date();
+  const live = e.start <= now && now < e.end;
+  const past = e.end <= now;
+  return `<div class="course${live ? " live" : ""}${past ? " past" : ""}${e.subject ? "" : " free"}">
+    <div class="when">${withDay ? `${fmtDate(e.start, { weekday: "short", day: "numeric", month: "short" })}, ` : ""}${fmtTime(e.start)}–${fmtTime(e.end)}${live ? " <b>en cours</b>" : ""}</div>
+    <div class="what">${e.subject ? `<a href="#/m/${e.subject.id}">${esc(e.title)}</a>` : esc(e.title)}</div>
+    ${e.location ? `<div class="where">${esc(e.location)}</div>` : ""}
+    ${e.details.length ? `<div class="sub">${e.details.map(esc).join(", ")}</div>` : ""}
+  </div>`;
+}
+
+function viewPlanning() {
+  if (!hasPlanningUrl()) {
+    return `<div class="page-head"><div><h1>Planning</h1></div></div>
+      <div class="empty-state"><p>Ajoute le lien iCal de ton emploi du temps (ADE : Exporter l'agenda, puis Générer URL) pour l'afficher ici.</p>
+      <a class="btn" href="#/reglages">Ajouter le lien</a></div>`;
+  }
+  if (!planning.loading && Date.now() - planning.loadedAt > PLANNING_TTL) loadPlanning();
+  const start = weekStart(planning.week);
+  const end = new Date(start); end.setDate(end.getDate() + 7);
+  const evs = planning.events.filter((e) => e.start >= start && e.start < end);
+  const last = planning.events[planning.events.length - 1];
+  const days = [...Array(7)].map((_, i) => { const d = new Date(start); d.setDate(d.getDate() + i); return d; })
+    .filter((d, i) => i < 5 || evs.some((e) => e.start.toDateString() === d.toDateString()));
+  const today = new Date().toDateString();
+  const sat = new Date(end); sat.setDate(sat.getDate() - 2);
+
+  let body;
+  if (planning.loading && !planning.events.length) body = `<p class="muted">Récupération du planning…</p>`;
+  else if (planning.error && !planning.events.length) body = `<div class="empty-state"><p>Impossible de récupérer le planning : ${esc(planning.error)}</p><button data-action="planning-refresh">Réessayer</button></div>`;
+  else body = `<div class="week">${days.map((d) => {
+      const list = evs.filter((e) => e.start.toDateString() === d.toDateString());
+      return `<div class="day${d.toDateString() === today ? " today" : ""}">
+        <h3>${fmtDate(d, { weekday: "long", day: "numeric", month: "short" })}</h3>
+        ${list.length ? list.map((e) => courseCard(e)).join("") : `<p class="small muted">Pas de cours</p>`}</div>`;
+    }).join("")}</div>
+    ${!evs.length && last && start > last.start ? `<p class="muted" style="margin-top:1rem">L'école n'a pas encore publié le planning au-delà du ${fmtDay(last.start)}.</p>` : ""}`;
+
+  return `<div class="page-head"><div><h1>Planning</h1>
+      <p class="meta"><span>Semaine du ${fmtDate(start, { day: "numeric", month: "short" })} au ${fmtDate(sat, { day: "numeric", month: "short" })}</span>
+      <span>${evs.length} cours</span>${planning.loadedAt ? `<span>actualisé à ${fmtTime(new Date(planning.loadedAt))}</span>` : ""}</p></div>
+      <div class="actions">
+        <button data-action="week" data-d="-1" aria-label="Semaine précédente">‹ Précédente</button>
+        <button data-action="week" data-d="0">Cette semaine</button>
+        <button data-action="week" data-d="1" aria-label="Semaine suivante">Suivante ›</button>
+        <button class="ghost" data-action="planning-refresh" ${planning.loading ? "disabled" : ""}>${planning.loading ? "Actualisation…" : "Actualiser"}</button>
+      </div></div>
+    ${body}`;
+}
+
+function nextCoursesSection() {
+  if (!hasPlanningUrl()) return "";
+  if (!planning.loading && Date.now() - planning.loadedAt > PLANNING_TTL) loadPlanning();
+  const now = new Date();
+  const next = planning.events.filter((e) => e.end > now).slice(0, 3);
+  if (!next.length) return "";
+  return `<section><div class="sec-head"><h2>Prochains cours</h2><a href="#/planning" class="small">Voir le planning</a></div>
+    <div class="course-row">${next.map((e) => courseCard(e, true)).join("")}</div></section>`;
+}
+
 function viewDashboard() {
   const upcoming = sortedExams(state.exams).filter((e) => daysUntil(e.starts_at) >= 0);
   const next = upcoming[0];
@@ -389,6 +528,8 @@ function viewDashboard() {
 
   return `<div class="page-head"><div>${head}</div>
       <div class="actions"><button data-action="new-exam">Ajouter un examen</button></div></div>
+
+    ${nextCoursesSection()}
 
     ${upcoming.length ? `<section><div class="sec-head"><h2>À venir</h2><a href="#/examens" class="small">Tous les examens</a></div>
       <div class="exam-list">${upcoming.slice(0, 5).map(examRow).join("")}</div></section>` : ""}
@@ -632,6 +773,11 @@ function viewSettings() {
       <p class="muted" style="max-width:70ch;margin-bottom:0.8rem">Exporte toute ta structure, ta progression, tes examens et tes accès en JSON. Le fichier se réimporte ici. Les fichiers uploadés et le coffre n'y sont pas inclus.</p>
       <button data-action="export">Télécharger la sauvegarde</button></section>
 
+    <section><div class="sec-head"><h2>Planning</h2></div>
+      <p class="muted" style="max-width:70ch;margin-bottom:0.8rem">Lien iCal de ton emploi du temps (ADE : Exporter l'agenda, puis Générer URL). Il est gardé dans ta base, jamais dans le code public du site.</p>
+      <div class="pw-row" style="max-width:720px"><input type="url" data-ics-url placeholder="https://…/anonymous_cal.jsp?…" value="${esc(state.settings?.[0]?.ics_url || "")}" aria-label="Lien iCal du planning">
+      <button class="primary" data-action="save-ics">Enregistrer le lien</button></div></section>
+
     <section><div class="sec-head"><h2>Coffre</h2></div>
       ${vault.key ? `<button data-action="vault-change-pw">Changer le mot de passe maître</button>`
         : `<p class="muted">Déverrouille le <a href="#/coffre">coffre</a> pour changer son mot de passe maître.</p>`}</section>`;
@@ -763,6 +909,17 @@ const actions = {
     await Promise.all(changed.map(({ x, k }) => update("units", x.id, { position: k })));
   },
   ics: exportICS,
+  week(el) { const d = Number(el.dataset.d); planning.week = d === 0 ? 0 : planning.week + d; render(); },
+  "planning-refresh": () => loadPlanning(true),
+  async "save-ics"() {
+    const v = document.querySelector("[data-ics-url]").value.trim();
+    if (v && !/^https:\/\//i.test(v)) { toast("Le lien doit commencer par https://", true); return; }
+    const row = await q(sb.from("settings").upsert({ user_id: state.user.id, ics_url: v || null, updated_at: new Date().toISOString() }).select().single());
+    state.settings = [row];
+    Object.assign(planning, { events: [], loadedAt: 0, error: null });
+    toast(v ? "Lien du planning enregistré." : "Lien du planning retiré.");
+    render();
+  },
   export: exportData,
   async import() {
     const txt = document.querySelector("[data-import-text]").value.trim();
@@ -939,6 +1096,7 @@ function sidebar(r) {
     <a class="brand" href="#/"><i><b style="background:var(--accent)"></b><b style="background:var(--hot)"></b><b style="background:var(--accent-2)"></b></i>Carnet ESIEE</a>
     <nav class="nav">
       <a href="#/"${on(r.a === "")}>Tableau de bord</a>
+      <a href="#/planning"${on(r.a === "planning")}>Planning</a>
       <a href="#/examens"${on(r.a === "examens")}>Examens</a>
       <a href="#/acces"${on(r.a === "acces")}>Accès</a>
       <a href="#/coffre"${on(r.a === "coffre")}>Coffre</a>
@@ -957,7 +1115,7 @@ function render() {
   if (!state.user) { $app.innerHTML = screenLogin(); return; }
   if (!state.loaded) { $app.innerHTML = `<div class="center"><p class="muted">Chargement…</p></div>`; return; }
   const r = route();
-  const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
+  const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, planning: viewPlanning, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
   const scroll = scrollY;
   const keepScroll = $app.dataset.route === location.hash;
   const sideScroll = $app.querySelector(".side")?.scrollTop ?? 0; // le menu garde sa position d'une page à l'autre
@@ -983,8 +1141,9 @@ async function boot() {
     const prev = state.user?.id;
     state.user = session?.user || null;
     if (!state.user) {
-      Object.assign(state, { loaded: false, semesters: [], subjects: [], units: [], resources: [], exams: [], links: [] });
+      Object.assign(state, { loaded: false, semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [] });
       vault.checked = false; vault.row = null; vaultLock();
+      Object.assign(planning, { events: [], loadedAt: 0, error: null, week: 0 });
       render(); return;
     }
     if (prev !== state.user.id) { state.loaded = false; render(); try { await loadAll(); } catch (e) { fail(e); } render(); }
