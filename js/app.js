@@ -73,6 +73,11 @@ async function loadAll() {
   const tables = ["semesters", "subjects", "units", "resources", "exams", "links", "settings"];
   const res = await Promise.all(tables.map((t) => q(sb.from(t).select("*"))));
   tables.forEach((t, i) => (state[t] = res[i]));
+  // métadonnées des jeux de questions (sans les questions) et historique des parties
+  [state.quizPools, state.quizAttempts] = await Promise.all([
+    q(sb.from("quiz_pools").select("id,subject_id,difficulty,content_hash,item_count,sources,model,created_at")),
+    q(sb.from("quiz_attempts").select("*").order("created_at", { ascending: false })),
+  ]);
   state.loaded = true;
 }
 
@@ -643,6 +648,140 @@ function nextCoursesSection() {
     <div class="course-row">${next.map((e) => courseCard(e, { time: true, day: true })).join("")}</div></section>`;
 }
 
+/* =========================================================
+   Révision : quiz et flashcards générés par Gemini (fonction Supabase « quiz »)
+   ========================================================= */
+const DIFFS = { facile: "Facile", moyen: "Moyen", difficile: "Difficile" };
+const GAME_SIZE = 10;
+let reviseDiff = "moyen";
+let study = null; // partie en cours
+
+const poolOf = (subjectId, diff) => (state.quizPools || []).find((p) => p.subject_id === subjectId && p.difficulty === diff);
+function attemptsOf(subjectId, diff) {
+  const pool = poolOf(subjectId, diff);
+  if (!pool) return [];
+  // seules les parties jouées sur la version actuelle du jeu comptent
+  return (state.quizAttempts || []).filter((a) => a.subject_id === subjectId && a.difficulty === diff && a.content_hash === pool.content_hash);
+}
+
+function reviseSection(sub) {
+  const pool = poolOf(sub.id, reviseDiff);
+  const att = attemptsOf(sub.id, reviseDiff);
+  const pct = (a) => Math.round((a.score / a.total) * 100);
+  const best = att.length ? att.reduce((m, a) => (pct(a) > pct(m) ? a : m)) : null;
+  const pdfs = state.resources.filter((r) => r.subject_id === sub.id && r.kind === "file" && /\.pdf$/i.test(r.title)).length;
+  return `<section>
+    <div class="sec-head"><h2>Réviser</h2>
+      <span class="seg" role="group" aria-label="Difficulté">${Object.entries(DIFFS).map(([k, l]) =>
+        `<button data-action="revise-diff" data-d="${k}" class="${reviseDiff === k ? "on" : ""}" aria-pressed="${reviseDiff === k}">${l}</button>`).join("")}</span></div>
+    <div class="revise">
+      <div class="actions">
+        <button class="primary" data-action="study" data-id="${sub.id}" data-mode="quiz">Lancer un quiz</button>
+        <button class="primary" data-action="study" data-id="${sub.id}" data-mode="flashcards">Lancer les flashcards</button>
+        ${pool ? `<button class="ghost" data-action="study-regen" data-id="${sub.id}">Régénérer les questions</button>` : ""}
+      </div>
+      <p class="small muted">${pool
+        ? `Jeu de ${pool.item_count} questions généré le ${fmtDate(pool.created_at, { day: "numeric", month: "short" })} à partir de ${pool.sources?.pdfs?.length || 0} PDF et du plan du cours. Chaque partie en tire ${GAME_SIZE} au hasard.
+           ${pool.sources?.skipped?.length ? ` Non lus (trop volumineux) : ${pool.sources.skipped.map(esc).join(", ")}.` : ""}`
+        : `Aucun jeu en niveau ${DIFFS[reviseDiff].toLowerCase()} pour l'instant : le premier lancement génère ${pdfs ? `les questions à partir de tes ${pdfs} PDF et du plan du cours` : "les questions à partir du plan du cours (ajoute tes PDF dans Ressources pour des questions plus précises)"}. Compte jusqu'à une minute.`}</p>
+      ${att.length ? `<div class="scores">
+        <span><b>${att.length}</b> partie${att.length > 1 ? "s" : ""}</span>
+        <span>meilleur <b>${best.score}/${best.total}</b></span>
+        <span>dernier <b>${att[0].score}/${att[0].total}</b> (${att[0].mode === "quiz" ? "quiz" : "flashcards"}, ${fmtDate(att[0].created_at, { day: "numeric", month: "short" })})</span>
+      </div>` : ""}
+    </div>
+  </section>`;
+}
+
+const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
+
+async function startStudy(subjectId, mode, force = false) {
+  study = { subjectId, mode, difficulty: reviseDiff, loading: true };
+  if (location.hash !== `#/reviser/${subjectId}`) location.hash = `#/reviser/${subjectId}`; else render();
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/quiz`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.access_token}`, apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ subject_id: subjectId, difficulty: study.difficulty, force }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(out.error || `Erreur ${r.status}`);
+    const { items, ...meta } = out.pool;
+    state.quizPools = [...(state.quizPools || []).filter((p) => p.id !== meta.id && !(p.subject_id === subjectId && p.difficulty === meta.difficulty)), meta];
+    const picked = shuffle(items).slice(0, GAME_SIZE).map((it) => {
+      const order = shuffle([0, 1, 2, 3]);
+      return { ...it, choices: order.map((k) => it.choices[k]), correct: order.indexOf(it.correct) };
+    });
+    Object.assign(study, { loading: false, hash: meta.content_hash, items: picked, idx: 0, score: 0, picked: null, flipped: false, misses: [], fresh: !out.cached });
+  } catch (e) {
+    Object.assign(study, { loading: false, error: e.message || String(e) });
+  }
+  render();
+}
+
+async function finishStudy() {
+  study.done = true;
+  render();
+  try {
+    const row = await q(sb.from("quiz_attempts").insert({
+      subject_id: study.subjectId, difficulty: study.difficulty, mode: study.mode,
+      content_hash: study.hash, score: study.score, total: study.items.length,
+    }).select().single());
+    state.quizAttempts = [row, ...(state.quizAttempts || [])];
+  } catch (e) { fail(e); }
+}
+
+function viewStudy() {
+  const sub = subjectOf(route().b);
+  if (!sub) return notFound();
+  if (!study || study.subjectId !== sub.id) { setTimeout(() => (location.hash = `#/m/${sub.id}`)); return ""; }
+  const head = `<div class="page-head"><div>
+      <p class="small muted"><a href="#/m/${sub.id}">${esc(sub.name)}</a></p>
+      <h1>${study.mode === "quiz" ? "Quiz" : "Flashcards"}</h1>
+      <p class="meta"><span>${DIFFS[study.difficulty]}</span>${study.items ? `<span>${Math.min(study.idx + 1, study.items.length)} / ${study.items.length}</span><span>score ${study.score}</span>` : ""}</p></div>
+      <div class="actions"><a class="btn" href="#/m/${sub.id}">Quitter</a></div></div>`;
+  if (study.loading) return head + `<div class="empty-state"><p>Préparation des questions… Si le jeu doit être généré, Gemini lit tes supports : compte jusqu'à une minute.</p></div>`;
+  if (study.error) return head + `<div class="empty-state"><p>${esc(study.error)}</p><button data-action="study" data-id="${sub.id}" data-mode="${study.mode}">Réessayer</button></div>`;
+
+  if (study.done) {
+    const pctv = Math.round((study.score / study.items.length) * 100);
+    const prev = attemptsOf(sub.id, study.difficulty).slice(1);
+    const best = prev.length ? Math.max(...prev.map((a) => Math.round((a.score / a.total) * 100))) : null;
+    return head + `<div class="study-card result">
+      <p class="big">${study.score} / ${study.items.length}</p>
+      <p>${pctv} % de bonnes réponses${best != null ? (pctv > best ? ", nouveau record" : `, record actuel ${best} %`) : ""}.</p>
+      <div class="actions"><button class="primary" data-action="study" data-id="${sub.id}" data-mode="${study.mode}">Rejouer (nouveau tirage)</button>
+        <button data-action="study" data-id="${sub.id}" data-mode="${study.mode === "quiz" ? "flashcards" : "quiz"}">Passer en ${study.mode === "quiz" ? "flashcards" : "quiz"}</button></div>
+    </div>
+    ${study.misses.length ? `<section><div class="sec-head"><h2>À retravailler</h2></div><div class="rows">${study.misses.map((it) =>
+      `<div class="rowi"><div><div class="t">${esc(it.question)}</div><div class="sub"><b>${esc(it.answer)}</b>. ${esc(it.explanation || "")}</div></div></div>`).join("")}</div></section>` : ""}`;
+  }
+
+  const it = study.items[study.idx];
+  const last = study.idx === study.items.length - 1;
+  const chapter = it.chapter ? `<p class="small muted">${esc(it.chapter)}</p>` : "";
+  if (study.mode === "quiz") {
+    const answered = study.picked != null;
+    return head + `<div class="study-card">
+      ${chapter}<h2 class="q">${esc(it.question)}</h2>
+      <div class="choices">${it.choices.map((c, k) => {
+        const cls = !answered ? "" : k === it.correct ? " good" : k === study.picked ? " bad" : " dim";
+        return `<button class="choice${cls}" data-action="answer" data-k="${k}" ${answered ? "disabled" : ""}><b>${"ABCD"[k]}</b> ${esc(c)}</button>`;
+      }).join("")}</div>
+      ${answered ? `<p class="explain">${study.picked === it.correct ? "Bonne réponse." : `Réponse attendue : <b>${esc(it.choices[it.correct])}</b>.`} ${esc(it.explanation || "")}</p>
+        <div class="actions"><button class="primary" data-action="next-q">${last ? "Voir mon score" : "Question suivante"}</button></div>` : ""}
+    </div>`;
+  }
+  return head + `<div class="study-card flash${study.flipped ? " flipped" : ""}">
+    ${chapter}<h2 class="q">${esc(it.question)}</h2>
+    ${study.flipped
+      ? `<div class="answer"><p class="a">${esc(it.answer)}</p>${it.explanation ? `<p class="small muted">${esc(it.explanation)}</p>` : ""}</div>
+         <div class="actions"><button class="primary" data-action="flash" data-ok="1">Je savais</button><button data-action="flash" data-ok="0">À revoir</button></div>`
+      : `<div class="actions"><button class="primary" data-action="flip">Voir la réponse</button></div><p class="small muted">Raccourcis : espace pour retourner, 1 = je savais, 2 = à revoir.</p>`}
+  </div>`;
+}
+
 function viewDashboard() {
   const upcoming = sortedExams(state.exams).filter((e) => daysUntil(e.starts_at) >= 0);
   const next = upcoming[0];
@@ -732,6 +871,8 @@ function viewSubject(id) {
         ? `${counts.done} maîtrisé${counts.done > 1 ? "s" : ""}, ${counts.review} à revoir, ${counts.doing} en cours, ${counts.todo} à voir. Clique sur une case pour changer son état.`
         : "Ajoute les séances ou chapitres de cette matière pour suivre ta progression."}</p>
     </section>
+
+    ${reviseSection(sub)}
 
     <section>
       <div class="sec-head"><h2>Séances et chapitres</h2><button class="primary" data-action="new-unit" data-id="${id}">Ajouter</button></div>
@@ -1307,6 +1448,38 @@ function route() {
   return { a: a || "", b };
 }
 
+actions["revise-diff"] = (el) => { reviseDiff = el.dataset.d; render(); };
+actions.study = (el) => startStudy(el.dataset.id, el.dataset.mode);
+actions["study-regen"] = (el) => {
+  if (!confirm("Régénérer le jeu de questions ? Le score repart de zéro pour ce niveau (l'historique est conservé).")) return;
+  startStudy(el.dataset.id, "quiz", true);
+};
+actions.answer = (el) => {
+  if (study.picked != null) return;
+  study.picked = Number(el.dataset.k);
+  const it = study.items[study.idx];
+  if (study.picked === it.correct) study.score++; else study.misses.push({ ...it, answer: it.choices[it.correct] });
+  render();
+};
+actions["next-q"] = () => { if (study.idx >= study.items.length - 1) return finishStudy(); study.idx++; study.picked = null; render(); };
+actions.flip = () => { study.flipped = true; render(); };
+actions.flash = (el) => {
+  const it = study.items[study.idx];
+  if (el.dataset.ok === "1") study.score++; else study.misses.push(it);
+  if (study.idx >= study.items.length - 1) return finishStudy();
+  study.idx++; study.flipped = false; render();
+};
+addEventListener("keydown", (ev) => {
+  if (!study || study.done || study.loading || !location.hash.startsWith("#/reviser/") || ev.target.closest("input, textarea")) return;
+  if (study.mode === "flashcards") {
+    if (ev.key === " " && !study.flipped) { ev.preventDefault(); actions.flip(); }
+    else if (study.flipped && (ev.key === "1" || ev.key === "2")) actions.flash({ dataset: { ok: ev.key === "1" ? "1" : "0" } });
+  } else if (study.picked == null && "1234abcdABCD".includes(ev.key) && ev.key.length === 1) {
+    const k = "1234".includes(ev.key) ? Number(ev.key) - 1 : "abcd".indexOf(ev.key.toLowerCase());
+    actions.answer({ dataset: { k } });
+  } else if (study.picked != null && ev.key === "Enter") actions["next-q"]();
+});
+
 // Semestres dépliés dans le menu, mémorisés d'une visite à l'autre
 const openSems = new Set((() => { try { return JSON.parse(localStorage.getItem("openSems") || "[]"); } catch { return []; } })());
 actions["toggle-sem"] = (el) => {
@@ -1357,7 +1530,7 @@ function render() {
   if (state.needMfa) { $app.innerHTML = screenMfa(); $app.querySelector("[name=code]")?.focus(); return; }
   if (!state.loaded) { $app.innerHTML = `<div class="center"><p class="muted">Chargement…</p></div>`; return; }
   const r = route();
-  const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, planning: viewPlanning, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
+  const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, planning: viewPlanning, reviser: viewStudy, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
   const scroll = scrollY;
   const keepScroll = $app.dataset.route === location.hash;
   const sideScroll = $app.querySelector(".side")?.scrollTop ?? 0; // le menu garde sa position d'une page à l'autre

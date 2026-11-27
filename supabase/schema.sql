@@ -187,3 +187,23 @@ drop policy if exists "mfa si active (fichiers)" on storage.objects;
 create policy "mfa si active (fichiers)" on storage.objects as restrictive for all to authenticated
   using (bucket_id <> 'resources' or (select private.mfa_ok()))
   with check (bucket_id <> 'resources' or (select private.mfa_ok()));
+
+-- Révision (quiz et flashcards générés) -----------------------
+create table if not exists quiz_pools (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users on delete cascade,
+  subject_id uuid not null references subjects on delete cascade,
+  difficulty text not null check (difficulty in ('facile','moyen','difficile')),
+  content_hash text not null, items jsonb not null, item_count int not null,
+  sources jsonb, model text, created_at timestamptz not null default now(),
+  unique (user_id, subject_id, difficulty)
+);
+create table if not exists quiz_attempts (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users on delete cascade,
+  subject_id uuid not null references subjects on delete cascade,
+  difficulty text not null, mode text not null check (mode in ('quiz','flashcards')),
+  content_hash text not null, score int not null, total int not null,
+  created_at timestamptz not null default now()
+);
+-- (RLS « own rows » + « mfa si active » et droits identiques aux autres tables)

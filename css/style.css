@@ -402,6 +402,29 @@ dialog footer { display: flex; justify-content: flex-end; gap: 0.6rem; margin-to
 .pop .btn { justify-self: start; margin-top: 0.3rem; }
 .pop.sheet { left: 10px; right: 10px; bottom: 10px; width: auto; }
 
+/* ---------- révision ---------- */
+.revise { display: grid; gap: 0.7rem; background: var(--surface); border: var(--bw) solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow); padding: 1rem; }
+.scores { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.scores span { background: var(--card); border: 2px solid var(--line); border-radius: var(--r-sm); padding: 0.15rem 0.55rem; font-size: 0.82rem; }
+.study-card {
+  max-width: 760px; margin: 0 auto; display: grid; gap: 1rem; background: var(--surface);
+  border: var(--bw) solid var(--line); border-radius: var(--r-md); box-shadow: 6px 6px 0 var(--sh); padding: clamp(1rem, 4vw, 2rem);
+}
+.study-card .q { font-size: 1.25rem; line-height: 1.35; }
+.choices { display: grid; gap: 0.6rem; }
+.choice { justify-content: flex-start; text-align: left; font-weight: 600; font-size: 0.95rem; padding: 0.7rem 0.9rem; line-height: 1.35; }
+.choice b { flex: none; display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border: 2px solid var(--line); border-radius: 50%; margin-right: 0.3rem; font-size: 0.8rem; }
+.choice.good, .choice.good:disabled { background: #6EE7B7; color: #000; opacity: 1; }
+.choice.bad, .choice.bad:disabled { background: var(--hot); color: #fff; opacity: 1; }
+.choice.dim:disabled { opacity: 0.45; }
+.explain { border-left: 6px solid var(--accent); padding: 0.4rem 0.8rem; background: var(--card); border-radius: var(--r-sm); }
+.study-card.flash { min-height: 16rem; align-content: center; text-align: center; justify-items: center; }
+.study-card.flash .actions { justify-content: center; }
+.study-card .answer { display: grid; gap: 0.5rem; border-top: 2px dashed var(--soft); padding-top: 1rem; width: 100%; }
+.study-card .a { font-size: 1.15rem; font-weight: 800; color: var(--accent); }
+.study-card.result { text-align: center; justify-items: center; }
+.study-card .big { font-family: var(--display); font-size: 3.2rem; line-height: 1; }
+
 /* ---------- mobile ---------- */
 @media (max-width: 820px) {
   .shell { grid-template-columns: 1fr; }
