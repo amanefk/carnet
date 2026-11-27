@@ -159,3 +159,31 @@ create policy "own rows" on settings for all to authenticated
   using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
 grant select, insert, update, delete on settings to authenticated;
 revoke all on settings from anon;
+
+-- Double authentification ------------------------------------
+-- Dès qu'un facteur TOTP vérifié existe, toute requête exige une
+-- session aal2 (mot de passe + code). Sans facteur, rien ne change.
+create schema if not exists private;
+revoke all on schema private from public;
+grant usage on schema private to authenticated;
+create or replace function private.mfa_ok()
+returns boolean language sql stable security definer set search_path = ''
+as $$
+  select coalesce((auth.jwt()->>'aal') = 'aal2', false)
+      or not exists (select 1 from auth.mfa_factors f where f.user_id = auth.uid() and f.status = 'verified');
+$$;
+revoke all on function private.mfa_ok() from public, anon;
+grant execute on function private.mfa_ok() to authenticated;
+do $$
+declare t text;
+begin
+  foreach t in array array['semesters','subjects','units','resources','exams','links','vault','settings'] loop
+    execute format('drop policy if exists "mfa si active" on %I', t);
+    execute format('create policy "mfa si active" on %I as restrictive for all to authenticated
+      using ((select private.mfa_ok())) with check ((select private.mfa_ok()))', t);
+  end loop;
+end $$;
+drop policy if exists "mfa si active (fichiers)" on storage.objects;
+create policy "mfa si active (fichiers)" on storage.objects as restrictive for all to authenticated
+  using (bucket_id <> 'resources' or (select private.mfa_ok()))
+  with check (bucket_id <> 'resources' or (select private.mfa_ok()));

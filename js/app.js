@@ -1,4 +1,5 @@
-import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+// Bibliothèque Supabase hébergée avec le site (version figée), plus de dépendance à un CDN tiers
+const { createClient } = window.supabase;
 import { SUPABASE_URL, SUPABASE_ANON_KEY, VAULT_AUTOLOCK_MIN, CLIPBOARD_CLEAR_SEC } from "./config.js";
 import * as V from "./vault.js";
 
@@ -11,7 +12,7 @@ const $app = document.getElementById("app");
 const $modal = document.getElementById("modal");
 
 const state = {
-  user: null, loaded: false,
+  user: null, loaded: false, needMfa: false,
   semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [],
 };
 const vault = { checked: false, row: null, key: null, data: null, revealed: new Set(), timer: null };
@@ -914,6 +915,13 @@ function viewSettings() {
       <div class="pw-row" style="max-width:720px"><input type="url" data-ics-url placeholder="https://…/anonymous_cal.jsp?…" value="${esc(state.settings?.[0]?.ics_url || "")}" aria-label="Lien iCal du planning">
       <button class="primary" data-action="save-ics">Enregistrer le lien</button></div></section>
 
+    <section><div class="sec-head"><h2>Double authentification</h2></div>
+      ${state.mfaFactor
+        ? `<p style="max-width:70ch;margin-bottom:0.8rem"><strong>Activée.</strong> <span class="muted">Chaque connexion demande ton mot de passe puis un code à 6 chiffres. Sans ce code, la base refuse toute lecture, coffre compris.</span></p>
+           <button class="danger" data-action="mfa-disable">Désactiver la double authentification</button>`
+        : `<p class="muted" style="max-width:70ch;margin-bottom:0.8rem">Ajoute un code à 6 chiffres (Google Authenticator, Authy, 1Password, l'app Mots de passe d'Apple…) en plus du mot de passe. Une fois activée, la base refuse toute lecture sans ce code.</p>
+           <button class="primary" data-action="mfa-enable">Activer la double authentification</button>`}</section>
+
     <section><div class="sec-head"><h2>Coffre</h2></div>
       ${vault.key ? `<button data-action="vault-change-pw">Changer le mot de passe maître</button>`
         : `<p class="muted">Déverrouille le <a href="#/coffre">coffre</a> pour changer son mot de passe maître.</p>`}</section>`;
@@ -1045,6 +1053,38 @@ const actions = {
     await Promise.all(changed.map(({ x, k }) => update("units", x.id, { position: k })));
   },
   ics: exportICS,
+  async "mfa-enable"() {
+    // nettoie les essais d'enrôlement inachevés
+    const { data: list } = await sb.auth.mfa.listFactors();
+    for (const f of (list?.all || []).filter((x) => x.status !== "verified")) await sb.auth.mfa.unenroll({ factorId: f.id });
+    const { data, error } = await sb.auth.mfa.enroll({ factorType: "totp", friendlyName: `Carnet ${new Date().toISOString().slice(0, 16)}` });
+    if (error) throw error;
+    const factorId = data.id;
+    $modal.innerHTML = `<form novalidate>
+      <h2>Activer la double authentification</h2>
+      <p class="small muted">1. Scanne ce QR code avec ton application d'authentification.</p>
+      <img src="${esc(data.totp.qr_code)}" alt="QR code à scanner" width="200" height="200" style="background:#fff;border:var(--bw) solid var(--line);border-radius:var(--r-sm);justify-self:start;padding:6px">
+      <p class="small muted">Pas de caméra ? Saisis cette clé à la main : <code style="word-break:break-all">${esc(data.totp.secret)}</code></p>
+      <label><span>2. Code à 6 chiffres affiché par l'application</span><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></label>
+      <footer><button type="button" data-cancel>Annuler</button><button type="submit" class="primary">Activer</button></footer></form>`;
+    const form = $modal.querySelector("form");
+    form.querySelector("[data-cancel]").onclick = async () => { $modal.close(); await sb.auth.mfa.unenroll({ factorId }).catch(() => {}); };
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const code = form.elements.code.value.trim();
+      const { error: e2 } = await sb.auth.mfa.challengeAndVerify({ factorId, code });
+      if (e2) { toast("Code incorrect. Vérifie l'heure de ton téléphone et réessaie.", true); return; }
+      $modal.close(); state.mfaFactor = await verifiedFactor();
+      toast("Double authentification activée."); render();
+    };
+    $modal.showModal(); form.elements.code.focus();
+  },
+  async "mfa-disable"() {
+    if (!confirm("Désactiver la double authentification ? Ton mot de passe suffira de nouveau pour accéder au site.")) return;
+    const { error } = await sb.auth.mfa.unenroll({ factorId: state.mfaFactor.id });
+    if (error) throw error;
+    state.mfaFactor = null; toast("Double authentification désactivée."); render();
+  },
   shift(el) {
     const d = Number(el.dataset.d); const k = planning.view === "month" ? "month" : "week";
     planning[k] = d === 0 ? 0 : planning[k] + d; render();
@@ -1146,6 +1186,13 @@ $app.addEventListener("submit", async (ev) => {
       const { error } = await sb.auth.signInWithPassword({ email: fd.email, password: fd.password });
       if (error) throw new Error(error.message === "Invalid login credentials" ? "Email ou mot de passe incorrect." : error.message);
     }
+    if (form.dataset.form === "mfa") {
+      const f = await verifiedFactor();
+      if (!f) throw new Error("Aucun facteur de double authentification trouvé.");
+      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: f.id, code: String(fd.code).trim() });
+      if (error) throw new Error("Code incorrect ou expiré.");
+      await enterApp();
+    }
     if (form.dataset.form === "signup") {
       const { data, error } = await sb.auth.signUp({ email: fd.email, password: fd.password });
       if (error) throw error;
@@ -1216,8 +1263,34 @@ function screenLogin() {
     <label><span>Email</span><input type="email" name="email" autocomplete="username" required></label>
     <div class="lbl"><span>Mot de passe</span><div class="pw-row"><input type="password" name="password" autocomplete="${signup ? "new-password" : "current-password"}" required minlength="8"><button type="button" data-pw-toggle>Afficher</button></div></div>
     <button class="primary" type="submit">${signup ? "Créer le compte" : "Se connecter"}</button>
-    <button type="button" class="ghost" data-action="toggle-auth">${signup ? "J'ai déjà un compte" : "Première visite : créer le compte"}</button>
   </form></div>`;
+}
+function screenMfa() {
+  return `<div class="center"><form class="card" data-form="mfa" autocomplete="off">
+    <div class="brand" style="margin:0"><i><b style="background:var(--accent)"></b><b style="background:var(--hot)"></b><b style="background:var(--accent-2)"></b></i>Carnet ESIEE</div>
+    <h1>Code de vérification</h1>
+    <p class="muted">Saisis le code à 6 chiffres affiché dans ton application d'authentification.</p>
+    <label><span>Code</span><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    <button class="primary" type="submit">Valider</button>
+    <button type="button" class="ghost" data-action="logout">Se déconnecter</button>
+  </form></div>`;
+}
+async function mfaRequired() {
+  const { data, error } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (error) return false;
+  return data.nextLevel === "aal2" && data.currentLevel !== "aal2";
+}
+async function verifiedFactor() {
+  const { data, error } = await sb.auth.mfa.listFactors();
+  if (error) throw error;
+  return (data.totp || []).find((f) => f.status === "verified") || null;
+}
+async function enterApp() {
+  state.needMfa = await mfaRequired();
+  if (state.needMfa) { render(); return; }
+  state.loaded = false; render();
+  try { await loadAll(); state.mfaFactor = await verifiedFactor(); } catch (e) { fail(e); }
+  render();
 }
 const themeLabel = () => (document.documentElement.dataset.theme === "dark" ? "☀ Mode clair" : "☾ Mode sombre");
 actions["toggle-theme"] = () => {
@@ -1259,6 +1332,7 @@ function render() {
   closePop();
   if (!configured) { $app.innerHTML = screenSetup(); return; }
   if (!state.user) { $app.innerHTML = screenLogin(); return; }
+  if (state.needMfa) { $app.innerHTML = screenMfa(); $app.querySelector("[name=code]")?.focus(); return; }
   if (!state.loaded) { $app.innerHTML = `<div class="center"><p class="muted">Chargement…</p></div>`; return; }
   const r = route();
   const views = { "": viewDashboard, s: () => viewSemester(r.b), m: () => viewSubject(r.b), examens: viewExams, planning: viewPlanning, acces: viewLinks, coffre: viewVault, reglages: viewSettings };
@@ -1282,17 +1356,17 @@ async function boot() {
   const { data } = await sb.auth.getSession();
   state.user = data.session?.user || null;
   render();
-  if (state.user) { try { await loadAll(); } catch (e) { fail(e); } render(); }
+  if (state.user) await enterApp();
   sb.auth.onAuthStateChange(async (event, session) => {
     const prev = state.user?.id;
     state.user = session?.user || null;
     if (!state.user) {
-      Object.assign(state, { loaded: false, semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [] });
+      Object.assign(state, { loaded: false, needMfa: false, mfaFactor: null, semesters: [], subjects: [], units: [], resources: [], exams: [], links: [], settings: [] });
       vault.checked = false; vault.row = null; vaultLock();
       Object.assign(planning, { events: [], loadedAt: 0, error: null, week: 0, month: 0, view: "week" });
       render(); return;
     }
-    if (prev !== state.user.id) { state.loaded = false; render(); try { await loadAll(); } catch (e) { fail(e); } render(); }
+    if (prev !== state.user.id) await enterApp();
   });
 }
 boot();

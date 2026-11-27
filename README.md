@@ -58,3 +58,11 @@ js/config.js     URL et clé Supabase
 supabase/schema.sql
 data/exemple-import.json
 ```
+
+## Sécurité
+- **Code public, données privées** : le dépôt ne contient aucun secret. La clé Supabase du site est publique par conception ; l'accès aux données est contrôlé par les règles RLS (chaque ligne et chaque fichier n'est lisible que par son propriétaire connecté).
+- **Double authentification (TOTP)** : à activer dans Réglages. Une fois activée, la base refuse toute requête d'une session qui n'a pas saisi le code.
+- **Coffre** : chiffré dans le navigateur (AES-256-GCM, clé dérivée du mot de passe maître par PBKDF2-SHA256, 600 000 itérations). Supabase ne stocke que du chiffré.
+- **Politique de sécurité du contenu (CSP)** : seuls les scripts hébergés avec le site s'exécutent, et le navigateur ne peut contacter que Supabase. La bibliothèque Supabase est copiée dans `js/vendor/` (version figée) au lieu d'être chargée depuis un CDN.
+- **Inscriptions fermées** dans Supabase (Authentication > Sign In / Providers).
+- **À protéger hors du site** : comptes GitHub, Supabase et la messagerie liée au compte, chacun avec sa propre double authentification.
