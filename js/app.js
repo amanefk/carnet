@@ -71,7 +71,9 @@ function drop(list, id) { state[list] = state[list].filter((r) => r.id !== id); 
 
 async function loadAll() {
   const tables = ["semesters", "subjects", "units", "resources", "exams", "links", "settings"];
-  const res = await Promise.all(tables.map((t) => q(sb.from(t).select("*"))));
+  // le texte extrait des PDF reste en base : on ne charge que sa longueur
+  const cols = { resources: "id,user_id,subject_id,unit_id,title,kind,storage_path,url,mime,size,created_at,text_chars" };
+  const res = await Promise.all(tables.map((t) => q(sb.from(t).select(cols[t] || "*"))));
   tables.forEach((t, i) => (state[t] = res[i]));
   // métadonnées des jeux de questions (sans les questions) et historique des parties
   [state.quizPools, state.quizAttempts] = await Promise.all([
@@ -363,7 +365,9 @@ async function uploadFiles(files, subjectId) {
     const path = `${state.user.id}/${subjectId}/${Date.now()}_${safe}`;
     const { error } = await sb.storage.from("resources").upload(path, file, { contentType: file.type || undefined });
     if (error) { fail(error); continue; }
-    put("resources", await insert("resources", { subject_id: subjectId, title: file.name, kind: "file", storage_path: path, mime: file.type || null, size: file.size }));
+    const row = await insert("resources", { subject_id: subjectId, title: file.name, kind: "file", storage_path: path, mime: file.type || null, size: file.size });
+    delete row.text_content; put("resources", row);
+    if (isPdf(row)) await indexPdf(row, file).catch((e) => console.warn("extraction", e));
     ok++;
   }
   if (ok) toast(ok === 1 ? "Fichier ajouté." : `${ok} fichiers ajoutés.`);
@@ -695,9 +699,34 @@ function reviseSection(sub) {
 
 const shuffle = (a) => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
 
+/* ---------- extraction du texte des PDF (dans le navigateur, une seule fois par fichier) ---------- */
+const isPdf = (r) => r.kind === "file" && ((r.mime || "").includes("pdf") || /\.pdf$/i.test(r.title));
+let pdfjsPromise = null;
+async function pdfText(data) {
+  pdfjsPromise ||= import("./vendor/pdfjs-unpdf-2.2.3.mjs"); // chargé à la demande (1,7 Mo)
+  const { getDocument } = await pdfjsPromise;
+  const task = getDocument({ data, isEvalSupported: false, useSystemFonts: true, disableFontFace: true });
+  const doc = await task.promise;
+  const pages = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const tc = await page.getTextContent();
+    pages.push(tc.items.map((it) => (it.str || "") + (it.hasEOL ? "\n" : " ")).join("").replace(/[ \t]+/g, " ").trim());
+    page.cleanup();
+  }
+  await task.destroy?.();
+  return pages.join("\n\n").slice(0, 400000);
+}
+async function indexPdf(res, file) {
+  const bytes = new Uint8Array(await (file || (await sb.storage.from("resources").download(res.storage_path)).data).arrayBuffer());
+  const text = await pdfText(bytes);
+  await q(sb.from("resources").update({ text_content: text, text_chars: text.length }).eq("id", res.id));
+  res.text_chars = text.length;
+}
+
 async function startStudy(subjectId, mode, force = false) {
-  study = { subjectId, mode, difficulty: reviseDiff, loading: true };
   const t0 = Date.now();
+  study = { subjectId, mode, difficulty: reviseDiff, loading: true, t0 };
   const tick = setInterval(() => {
     const el = document.querySelector("[data-elapsed]");
     if (!study?.loading) return clearInterval(tick);
@@ -705,6 +734,12 @@ async function startStudy(subjectId, mode, force = false) {
   }, 1000);
   if (location.hash !== `#/reviser/${subjectId}`) location.hash = `#/reviser/${subjectId}`; else render();
   try {
+    const todo = state.resources.filter((r) => r.subject_id === subjectId && isPdf(r) && r.text_chars == null);
+    for (const [i, r] of todo.entries()) {
+      study.step = `Lecture des PDF (${i + 1}/${todo.length}) : ${r.title}`; render();
+      try { await indexPdf(r); } catch (e) { console.warn("extraction", r.title, e); r.text_chars = 0; }
+    }
+    study.step = "Génération des questions par Mistral…"; render();
     const { data: { session } } = await sb.auth.getSession();
     const r = await fetch(`${SUPABASE_URL}/functions/v1/quiz`, {
       signal: AbortSignal.timeout(170000),
@@ -749,7 +784,7 @@ function viewStudy() {
       <h1>${study.mode === "quiz" ? "Quiz" : "Flashcards"}</h1>
       <p class="meta"><span>${DIFFS[study.difficulty]}</span>${study.items ? `<span>${Math.min(study.idx + 1, study.items.length)} / ${study.items.length}</span><span>score ${study.score}</span>` : ""}</p></div>
       <div class="actions"><a class="btn" href="#/m/${sub.id}">Quitter</a></div></div>`;
-  if (study.loading) return head + `<div class="empty-state"><p>Préparation des questions… <b data-elapsed>0 s</b></p>
+  if (study.loading) return head + `<div class="empty-state"><p>${esc(study.step || "Préparation des questions…")} <b data-elapsed>${Math.round((Date.now() - study.t0) / 1000)} s</b></p>
     <p class="small muted">Si le jeu doit être généré, Mistral lit le texte de tes PDF : compte 30 secondes à 1 minute 30. Ne quitte pas la page.</p></div>`;
   if (study.error) return head + `<div class="empty-state"><p>${esc(study.error)}</p><button data-action="study" data-id="${sub.id}" data-mode="${study.mode}">Réessayer</button></div>`;
 

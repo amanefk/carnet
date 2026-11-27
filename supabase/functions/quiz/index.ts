@@ -3,7 +3,6 @@
 // Le jeu est mis en cache dans quiz_pools tant que le contenu du cours ne change pas.
 // Secret requis : MISTRAL_API_KEY (facultatif : MISTRAL_MODEL).
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { extractText, getDocumentProxy } from "npm:unpdf@2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -21,7 +20,6 @@ const LEVELS: Record<string, string> = {
 const PER_BATCH = 12;                // 2 lots en parallèle = 24 questions
 const DEADLINE_MS = 135_000;         // la plateforme coupe la fonction vers 150 s
 const MAX_TEXT_CHARS = 90_000;       // ~25 000 tokens de cours envoyés au modèle
-const MAX_PDF_BYTES = 30 * 1024 * 1024;
 
 async function sha256(text: string) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -51,14 +49,16 @@ Deno.serve(async (req) => {
   const { data: subject } = await sb.from("subjects").select("id,name,ue,description").eq("id", body.subject_id).maybeSingle();
   if (!subject) return json(404, { error: "Matière introuvable." });
   const { data: units } = await sb.from("units").select("title,kind,notes,position").eq("subject_id", subject.id).order("position");
-  const { data: res } = await sb.from("resources").select("title,storage_path,size,mime,kind").eq("subject_id", subject.id).eq("kind", "file");
-  const pdfs = (res ?? []).filter((r) => r.storage_path && ((r.mime ?? "").includes("pdf") || /\.pdf$/i.test(r.title)))
+  // Le texte des PDF est extrait dans le navigateur (limite CPU des fonctions) et stocké en base
+  const { data: res } = await sb.from("resources").select("title,storage_path,size,mime,kind,text_content,text_chars")
+    .eq("subject_id", subject.id).eq("kind", "file");
+  const pdfs = (res ?? []).filter((r) => (r.mime ?? "").includes("pdf") || /\.pdf$/i.test(r.title))
     .sort((a, b) => a.title.localeCompare(b.title));
 
   const hash = await sha256(JSON.stringify({
-    v: 2, difficulty, name: subject.name, description: subject.description,
+    v: 3, difficulty, name: subject.name, description: subject.description,
     units: (units ?? []).map((u) => [u.title, u.kind, u.notes]),
-    pdfs: pdfs.map((p) => [p.storage_path, p.size]),
+    pdfs: pdfs.map((p) => [p.storage_path, p.size, p.text_chars]),
   }));
   const { data: existing } = await sb.from("quiz_pools").select("*").eq("subject_id", subject.id).eq("difficulty", difficulty).maybeSingle();
   if (existing && existing.content_hash === hash && !body.force) return json(200, { pool: existing, cached: true });
@@ -66,24 +66,11 @@ Deno.serve(async (req) => {
     return json(400, { error: "Cette matière n'a ni PDF ni chapitres : ajoute du contenu avant de générer des questions." });
   }
 
-  // Extraction du texte des PDF (les images et schémas ne sont pas lus)
   const texts: string[] = []; const used: string[] = []; const skipped: string[] = [];
-  let bytesTotal = 0;
   for (const p of pdfs) {
-    if (bytesTotal + (p.size ?? 0) > MAX_PDF_BYTES) { skipped.push(p.title); continue; }
-    try {
-      const { data: blob, error } = await sb.storage.from("resources").download(p.storage_path);
-      if (error || !blob) throw error ?? new Error("vide");
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      bytesTotal += bytes.length;
-      const pdf = await getDocumentProxy(bytes);
-      const { text } = await extractText(pdf, { mergePages: true });
-      const clean = tidy(String(text));
-      if (clean.length < 200) { skipped.push(`${p.title} (pas de texte : PDF scanné ?)`); continue; }
-      texts.push(`### ${p.title}\n${clean}`); used.push(p.title);
-    } catch (e) {
-      console.log(`quiz: extraction impossible ${p.title} : ${e}`); skipped.push(p.title);
-    }
+    const clean = tidy(p.text_content ?? "");
+    if (clean.length < 200) { skipped.push(p.text_chars == null ? `${p.title} (pas encore lu)` : `${p.title} (pas de texte : PDF scanné ?)`); continue; }
+    texts.push(`### ${p.title}\n${clean}`); used.push(p.title);
   }
   // Répartition équitable du volume entre les documents
   let course = "";
